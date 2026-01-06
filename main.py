@@ -5,7 +5,7 @@ import os
 import time
 
 # --- CONFIGURATION ---
-# ETFs you specifically requested
+# Fixed: Added the specific ETFs to the list
 STRATEGIC_TICKERS =
 
 # --- FUNCTIONS ---
@@ -15,6 +15,7 @@ def get_sp500_tickers():
     try:
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         tables = pd.read_html(url)
+        # The S&P 500 table is usually the first one 
         df = tables
         tickers = df.tolist()
         # Clean tickers (replace dots with hyphens for yfinance, e.g., BRK.B -> BRK-B)
@@ -42,29 +43,23 @@ def get_nasdaq_tickers():
 def calculate_demark(df):
     """
     Calculates TD Sequential Setup (9).
-    Returns the DataFrame with 'TD_Buy_Setup', 'TD_Sell_Setup', 
-    and 'Perfected' flags.
+    Returns the DataFrame with 'TD_Buy_Setup', 'TD_Sell_Setup'.
     """
     # Create shift columns
     df['Close_4'] = df['Close'].shift(4)
     
-    # Initialize counters
-    df = 0
-    df = 0
-    
-    # We need to iterate to handle the "consecutive" reset logic
+    # Initialize counters with 0
+    # Using a loop is clearer for the specific reset logic of TD Sequential
     buy_seq = 0
     sell_seq = 0
     
-    # Arrays to store results for speed
     buy_setups =  * len(df)
     sell_setups =  * len(df)
     
     closes = df['Close'].values
     closes_4 = df['Close_4'].values
-    lows = df['Low'].values
-    highs = df['High'].values
     
+    # Start loop from index 4 (since we need 4 days prior)
     for i in range(4, len(df)):
         # Buy Setup (Close < Close_4)
         if closes[i] < closes_4[i]:
@@ -88,19 +83,27 @@ def calculate_demark(df):
 def analyze_ticker(ticker):
     try:
         # Download data (approx 6 months is enough for a 9 count)
-        df = yf.download(ticker, period="6mo", progress=False)
+        # auto_adjust=True helps standardise split data
+        df = yf.download(ticker, period="6mo", progress=False, auto_adjust=True)
         
         if len(df) < 20: 
             return None
 
-        # Fix MultiIndex columns if present (yfinance update)
+        # Fix MultiIndex columns if present (common yfinance issue)
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+            try:
+                # If column is ('Adj Close', 'AAPL'), we just want 'Adj Close'
+                df.columns = df.columns.get_level_values(0)
+            except:
+                pass
+
+        # Ensure we have the standard OHLC columns
+        if 'Close' not in df.columns:
+            return None
 
         df = calculate_demark(df)
         
         last_row = df.iloc[-1]
-        prev_row = df.iloc[-2]
         
         signal = None
         
@@ -108,7 +111,6 @@ def analyze_ticker(ticker):
         # We look for a 9 on the TODAY candle
         if last_row == 9:
             # Perfection Check: Low of 8 or 9 < Low of 6 and 7
-            # Indices: 9=i, 8=i-1, 7=i-2, 6=i-3
             l9 = df['Low'].iloc[-1]
             l8 = df['Low'].iloc[-2]
             l7 = df['Low'].iloc[-3]
@@ -153,7 +155,7 @@ def analyze_ticker(ticker):
         return signal
 
     except Exception as e:
-        # print(f"Error analyzing {ticker}: {e}") # Silence errors to keep logs clean
+        # print(f"Error analyzing {ticker}: {e}") # Keep logs clean
         return None
 
 def send_telegram_alert(message):
@@ -161,7 +163,7 @@ def send_telegram_alert(message):
     chat_id = os.environ.get('TELEGRAM_CHAT_ID')
     
     if not token or not chat_id:
-        print("Telegram credentials missing.")
+        print("Telegram credentials missing in GitHub Secrets.")
         return
         
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -195,7 +197,7 @@ if __name__ == "__main__":
     
     # Build Message
     if not buy_signals and not sell_signals:
-        print("No signals found.")
+        print("No signals found today.")
     else:
         msg = "🔔 **DE-MARK HIGH VALUE ALERTS** 🔔\n\n"
         

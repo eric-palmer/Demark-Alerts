@@ -5,8 +5,7 @@ import os
 import time
 
 # --- CONFIGURATION ---
-# Fixed: Added the specific ETFs to the list
-STRATEGIC_TICKERS =
+STRATEGIC_TICKERS = ['IBIT', 'ETHA', 'GLD', 'SLV', 'PALL', 'PPLT']
 
 # --- FUNCTIONS ---
 
@@ -15,102 +14,95 @@ def get_sp500_tickers():
     try:
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         tables = pd.read_html(url)
-        # The S&P 500 table is usually the first one 
-        df = tables
-        tickers = df.tolist()
-        # Clean tickers (replace dots with hyphens for yfinance, e.g., BRK.B -> BRK-B)
+        df = tables[0]
+        tickers = df['Symbol'].tolist()
+        # Clean tickers (e.g., BRK.B -> BRK-B)
         return [t.replace('.', '-') for t in tickers]
     except Exception as e:
         print(f"Error getting S&P 500: {e}")
-        return
+        return []
 
 def get_nasdaq_tickers():
     """Scrapes Nasdaq 100 tickers from Wikipedia"""
     try:
         url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
         tables = pd.read_html(url)
-        # Search for the table with 'Ticker' or 'Symbol'
         for table in tables:
             if 'Ticker' in table.columns:
-                return table.tolist()
+                return table['Ticker'].tolist()
             if 'Symbol' in table.columns:
-                return table.tolist()
-        return
+                return table['Symbol'].tolist()
+        return []
     except Exception as e:
         print(f"Error getting Nasdaq 100: {e}")
-        return
+        return []
 
 def calculate_demark(df):
     """
     Calculates TD Sequential Setup (9).
-    Returns the DataFrame with 'TD_Buy_Setup', 'TD_Sell_Setup'.
     """
-    # Create shift columns
+    # Create shift column (4 bars back)
     df['Close_4'] = df['Close'].shift(4)
     
-    # Initialize counters with 0
-    # Using a loop is clearer for the specific reset logic of TD Sequential
-    buy_seq = 0
-    sell_seq = 0
-    
-    buy_setups =  * len(df)
-    sell_setups =  * len(df)
+    # Initialize lists to hold the counts
+    buy_setups = [0] * len(df)
+    sell_setups = [0] * len(df)
     
     closes = df['Close'].values
     closes_4 = df['Close_4'].values
     
-    # Start loop from index 4 (since we need 4 days prior)
+    buy_seq = 0
+    sell_seq = 0
+
+    # Start loop from index 4 
     for i in range(4, len(df)):
-        # Buy Setup (Close < Close_4)
+        # --- BUY SETUP (Price < Price 4 bars ago) ---
         if closes[i] < closes_4[i]:
             buy_seq += 1
         else:
             buy_seq = 0
         buy_setups[i] = buy_seq
         
-        # Sell Setup (Close > Close_4)
+        # --- SELL SETUP (Price > Price 4 bars ago) ---
         if closes[i] > closes_4[i]:
             sell_seq += 1
         else:
             sell_seq = 0
         sell_setups[i] = sell_seq
 
-    df = buy_setups
-    df = sell_setups
+    df['TD_Buy_Setup'] = buy_setups
+    df['TD_Sell_Setup'] = sell_setups
     
     return df
 
 def analyze_ticker(ticker):
     try:
-        # Download data (approx 6 months is enough for a 9 count)
-        # auto_adjust=True helps standardise split data
+        # Download data (6 months is sufficient for a 9 count)
         df = yf.download(ticker, period="6mo", progress=False, auto_adjust=True)
         
+        # Data validation
         if len(df) < 20: 
             return None
-
-        # Fix MultiIndex columns if present (common yfinance issue)
+        
+        # Handling MultiIndex columns (yfinance update fix)
         if isinstance(df.columns, pd.MultiIndex):
             try:
-                # If column is ('Adj Close', 'AAPL'), we just want 'Adj Close'
                 df.columns = df.columns.get_level_values(0)
             except:
                 pass
 
-        # Ensure we have the standard OHLC columns
         if 'Close' not in df.columns:
             return None
 
+        # Calculate DeMark Indicators
         df = calculate_demark(df)
         
         last_row = df.iloc[-1]
-        
         signal = None
         
-        # --- BUY SIGNAL LOGIC ---
-        # We look for a 9 on the TODAY candle
-        if last_row == 9:
-            # Perfection Check: Low of 8 or 9 < Low of 6 and 7
+        # --- BUY SIGNAL LOGIC (TD 9) ---
+        if last_row['TD_Buy_Setup'] == 9:
+            # Perfection Rule: Low of bar 8 or 9 < Low of bars 6 and 7
             l9 = df['Low'].iloc[-1]
             l8 = df['Low'].iloc[-2]
             l7 = df['Low'].iloc[-3]
@@ -118,7 +110,7 @@ def analyze_ticker(ticker):
             
             is_perfected = (l9 < l7 and l9 < l6) or (l8 < l7 and l8 < l6)
             
-            # Stop Loss: Lowest Low of the 9 bars
+            # TD Risk Level (Stop Loss): Lowest Low of the 9 bars
             setup_lows = df['Low'].iloc[-9:]
             stop_loss = min(setup_lows)
             
@@ -130,9 +122,9 @@ def analyze_ticker(ticker):
                 'stop_loss': stop_loss
             }
 
-        # --- SELL SIGNAL LOGIC ---
-        elif last_row == 9:
-            # Perfection Check: High of 8 or 9 > High of 6 and 7
+        # --- SELL SIGNAL LOGIC (TD 9) ---
+        elif last_row['TD_Sell_Setup'] == 9:
+            # Perfection Rule: High of bar 8 or 9 > High of bars 6 and 7
             h9 = df['High'].iloc[-1]
             h8 = df['High'].iloc[-2]
             h7 = df['High'].iloc[-3]
@@ -140,7 +132,7 @@ def analyze_ticker(ticker):
             
             is_perfected = (h9 > h7 and h9 > h6) or (h8 > h7 and h8 > h6)
             
-            # Stop Loss: Highest High of the 9 bars
+            # TD Risk Level (Stop Loss): Highest High of the 9 bars
             setup_highs = df['High'].iloc[-9:]
             stop_loss = max(setup_highs)
             
@@ -154,8 +146,7 @@ def analyze_ticker(ticker):
             
         return signal
 
-    except Exception as e:
-        # print(f"Error analyzing {ticker}: {e}") # Keep logs clean
+    except Exception:
         return None
 
 def send_telegram_alert(message):
@@ -163,7 +154,7 @@ def send_telegram_alert(message):
     chat_id = os.environ.get('TELEGRAM_CHAT_ID')
     
     if not token or not chat_id:
-        print("Telegram credentials missing in GitHub Secrets.")
+        print("Telegram credentials missing.")
         return
         
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -180,22 +171,30 @@ if __name__ == "__main__":
     nasdaq = get_nasdaq_tickers()
     sp500 = get_sp500_tickers()
     
-    # Combine and remove duplicates
+    # Combine and ensure unique list
     full_universe = list(set(nasdaq + sp500 + STRATEGIC_TICKERS))
     print(f"Scanning {len(full_universe)} tickers...")
     
-    buy_signals =
-    sell_signals =
+    buy_signals = []
+    sell_signals = []
     
-    for ticker in full_universe:
+    for i, ticker in enumerate(full_universe):
+        # Progress indicator for long lists
+        if i % 50 == 0:
+            print(f"Processing {i}/{len(full_universe)}...")
+            
         result = analyze_ticker(ticker)
+        
         if result:
             if result['type'] == 'BUY':
                 buy_signals.append(result)
             else:
                 sell_signals.append(result)
+        
+        # Small sleep to avoid Yahoo Finance rate limits (429 errors)
+        time.sleep(0.05)
     
-    # Build Message
+    # Build Output Message
     if not buy_signals and not sell_signals:
         print("No signals found today.")
     else:

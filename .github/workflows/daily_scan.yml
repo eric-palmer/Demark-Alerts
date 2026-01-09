@@ -3,7 +3,7 @@ name: Run Scanner
 on:
   schedule:
     - cron: '0 21 * * 1-5' # Runs Mon-Fri at 4pm EST
-  workflow_dispatch:
+  workflow_dispatch:      # Allows manual run button
 
 jobs:
   build:

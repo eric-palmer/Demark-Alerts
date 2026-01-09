@@ -1,27 +1,27 @@
-name: DeMark Daily Scanner
+name: Run Scanner
 
 on:
   schedule:
-    # Runs at 9:30 PM UTC (4:30 PM EST) every weekday
-    - cron: '30 21 * * 1-5'
-  workflow_dispatch: # Allows you to click "Run" manually for testing
+    - cron: '0 21 * * 1-5' # Runs Mon-Fri at 4pm EST
+  workflow_dispatch:      # Allows you to click the "Run workflow" button manually
 
 jobs:
-  run-scanner:
+  build:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-        
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
-          
+          python-version: '3.11'  # <--- CRITICAL FIX (Upgrades Python to prevent crash)
+
       - name: Install libraries
-        run: pip install -r requirements.txt
-        
+        run: |
+          pip install yfinance pandas requests lxml pandas-datareader
+
       - name: Run Scanner
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}

@@ -8,7 +8,7 @@ import io
 import datetime
 import numpy as np
 
-# --- CONFIGURATION (CUSTOM WATCHLIST) ---
+# --- CONFIGURATION (INSTITUTIONAL WATCHLIST) ---
 STRATEGIC_TICKERS = [
     # -- Meme / PolitiFi --
     'DJT', 'PENGU-USD', 'FARTCOIN-USD', 'DOGE-USD', 'SHIB-USD', 'PEPE-USD',
@@ -109,7 +109,7 @@ def get_top_futures():
     ]
 
 # ==========================================================
-#  SHARED MACRO DATA (Single Source of Truth)
+#  SHARED MACRO DATA
 # ==========================================================
 def get_shared_macro_data():
     try:
@@ -117,12 +117,8 @@ def get_shared_macro_data():
         fred = web.DataReader(['WALCL', 'WTREGEN', 'RRPONTSYD', 'DGS10', 'DGS2', 'T5YIE'], 'fred', start, datetime.datetime.now())
         fred = fred.resample('D').ffill().dropna()
         
-        # Net Liquidity = Fed Assets - TGA - RRP
         net_liq = (fred['WALCL'] / 1000) - fred['WTREGEN'] - fred['RRPONTSYD']
-        
-        # Term Premia Proxy (Yield Curve Slope: 10Y - 2Y)
         term_premia_proxy = fred['DGS10'] - fred['DGS2']
-        
         spy = yf.download('SPY', start=start, progress=False)['Close']
         if isinstance(spy, pd.DataFrame): spy = spy.iloc[:, 0]
         
@@ -147,7 +143,6 @@ def get_michael_howell_update(data):
     if not data: return "⚠️ Data Error"
     roc_med = data['net_liq'].pct_change(63).iloc[-1]
     acceleration = data['net_liq'].pct_change(63).diff(20).iloc[-1]
-    
     tp_current = data['term_premia'].iloc[-1]
     tp_prev = data['term_premia'].iloc[-20]
     tp_trend = "RISING (Bearish)" if tp_current > tp_prev else "FALLING (Bullish)"
@@ -177,7 +172,7 @@ def get_bitcoin_layer_update(data):
         signal = "🟡 NEUTRAL"
         if correlation > 0.65: signal = "🟢 HIGH CONVICTION (Macro Driven)"
         elif correlation < 0.3: signal = "⚪ DECOUPLED (Idiosyncratic)"
-        return f"🟠 **THE BITCOIN LAYER**\n   └ **Correlation:** {correlation:.2f} (90-Day)\n   └ **Context:** {signal}"
+        return f"🟠 **THE BITCOIN LAYER**\n   └ **Signal:** {signal}\n   └ **Correlation:** {correlation:.2f} (90-Day)"
     except: return "⚠️ Bitcoin Layer Error"
 
 def get_btc_macro_update(data):
@@ -206,13 +201,38 @@ def get_onchain_update():
     except: return "⚠️ On-Chain Error"
 
 # ==========================================================
-#  ENGINE: MULTI-TIMEFRAME ANALYSIS
+#  ENGINE 6: MULTI-TIMEFRAME ANALYSIS
 # ==========================================================
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def check_squeeze(df):
+    sma = df['Close'].rolling(20).mean(); std = df['Close'].rolling(20).std()
+    upper_bb = sma + (std * 2); lower_bb = sma - (std * 2)
+    tr = pd.DataFrame()
+    tr['h-l'] = df['High'] - df['Low']
+    tr['h-pc'] = abs(df['High'] - df['Close'].shift(1))
+    tr['l-pc'] = abs(df['Low'] - df['Close'].shift(1))
+    atr = tr.max(axis=1).rolling(20).mean()
+    upper_kc = sma + (atr * 1.5); lower_kc = sma - (atr * 1.5)
+    is_squeeze = (lower_bb.iloc[-1] > lower_kc.iloc[-1]) and (upper_bb.iloc[-1] < upper_kc.iloc[-1])
+    
+    if is_squeeze:
+        y = df['Close'].iloc[-20:].values; x = np.arange(len(y))
+        slope = np.polyfit(x, y, 1)[0]
+        return {'status': True, 'bias': "BULLISH 🟢" if slope > 0 else "BEARISH 🔴", 'move': atr.iloc[-1] * 2}
+    return {'status': False}
+
 def calculate_demark(df):
     df['Close_4'] = df['Close'].shift(4)
     df['Buy_Setup'] = 0; df['Sell_Setup'] = 0; df['Buy_Countdown'] = 0; df['Sell_Countdown'] = 0
     buy_seq = 0; sell_seq = 0; buy_cd = 0; sell_cd = 0; active_buy = False; active_sell = False
-    
+    buy_idxs = []; sell_idxs = []
+
     closes = df['Close'].values; closes_4 = df['Close_4'].values
     lows = df['Low'].values; highs = df['High'].values
     
@@ -223,42 +243,24 @@ def calculate_demark(df):
         df.iloc[i, df.columns.get_loc('Buy_Setup')] = buy_seq
         df.iloc[i, df.columns.get_loc('Sell_Setup')] = sell_seq
         
-        if buy_seq == 9: active_buy = True; buy_cd = 0; active_sell = False
-        if sell_seq == 9: active_sell = True; sell_cd = 0; active_buy = False
+        if buy_seq == 9: active_buy = True; buy_cd = 0; buy_idxs = []; active_sell = False
+        if sell_seq == 9: active_sell = True; sell_cd = 0; sell_idxs = []; active_buy = False
 
-        if active_buy and closes[i] <= lows[i-2]:
-            buy_cd += 1; df.iloc[i, df.columns.get_loc('Buy_Countdown')] = buy_cd
-            if buy_cd == 13: active_buy = False
-        if active_sell and closes[i] >= highs[i-2]:
-            sell_cd += 1; df.iloc[i, df.columns.get_loc('Sell_Countdown')] = sell_cd
-            if sell_cd == 13: active_sell = False
+        if active_buy:
+            if closes[i] <= lows[i-2]:
+                buy_cd += 1; buy_idxs.append(i)
+                df.iloc[i, df.columns.get_loc('Buy_Countdown')] = buy_cd
+                if buy_cd == 13:
+                    if len(buy_idxs) >= 8 and lows[i] <= closes[buy_idxs[7]]: df.iloc[i, df.columns.get_loc('Buy_13_Perfected')] = True
+                    active_buy = False
+        if active_sell:
+            if closes[i] >= highs[i-2]:
+                sell_cd += 1; sell_idxs.append(i)
+                df.iloc[i, df.columns.get_loc('Sell_Countdown')] = sell_cd
+                if sell_cd == 13:
+                    if len(sell_idxs) >= 8 and highs[i] >= closes[sell_idxs[7]]: df.iloc[i, df.columns.get_loc('Sell_13_Perfected')] = True
+                    active_sell = False
     return df
-
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-def check_squeeze(df):
-    sma = df['Close'].rolling(20).mean()
-    std = df['Close'].rolling(20).std()
-    upper_bb = sma + (std * 2); lower_bb = sma - (std * 2)
-    
-    tr = pd.DataFrame()
-    tr['h-l'] = df['High'] - df['Low']
-    tr['h-pc'] = abs(df['High'] - df['Close'].shift(1))
-    tr['l-pc'] = abs(df['Low'] - df['Close'].shift(1))
-    atr = tr.max(axis=1).rolling(20).mean()
-    upper_kc = sma + (atr * 1.5); lower_kc = sma - (atr * 1.5)
-    
-    is_squeeze = (lower_bb.iloc[-1] > lower_kc.iloc[-1]) and (upper_bb.iloc[-1] < upper_kc.iloc[-1])
-    
-    # Move Calculation (2x ATR)
-    move = atr.iloc[-1] * 2
-    
-    return {'status': is_squeeze, 'move': move}
 
 def analyze_ticker(ticker):
     try:
@@ -277,40 +279,43 @@ def analyze_ticker(ticker):
             frame['RSI'] = calculate_rsi(frame['Close'])
             frame = calculate_demark(frame)
         
-        # Squeeze Check
-        d_sq = check_squeeze(df)
-        w_sq = check_squeeze(df_weekly)
-        
-        # Last Rows
+        d_sq = check_squeeze(df); w_sq = check_squeeze(df_weekly)
         last_d = df.iloc[-1]; last_w = df_weekly.iloc[-1]
         price = last_d['Close']
         
-        # --- 1. DEMARK SIGNALS ---
-        dm_sig = None
-        dm_data = {}
+        # --- DEMARK SIGNALS (PERFECTED + UNPERFECTED) ---
+        dm_sig = None; dm_data = None
         
-        # Daily
-        if last_d['Buy_Countdown'] == 13: dm_data = {'tf': 'Daily', 'type': 'BUY 13', 'target': price*1.15, 'stop': min(df['Low'].iloc[-13:])}
-        elif last_d['Sell_Countdown'] == 13: dm_data = {'tf': 'Daily', 'type': 'SELL 13', 'target': price*0.85, 'stop': max(df['High'].iloc[-13:])}
-        elif last_d['Buy_Setup'] == 9: dm_data = {'tf': 'Daily', 'type': 'BUY 9', 'target': price*1.05, 'stop': min(df['Low'].iloc[-9:])}
-        elif last_d['Sell_Setup'] == 9: dm_data = {'tf': 'Daily', 'type': 'SELL 9', 'target': price*0.95, 'stop': max(df['High'].iloc[-9:])}
+        # Determine Perfection Status
+        d_perf = last_d.get('Buy_13_Perfected') or last_d.get('Sell_13_Perfected') or False
+        if '9' in str(last_d['Buy_Setup']): d_perf = (df['Low'].iloc[-1] < df['Low'].iloc[-3] and df['Low'].iloc[-1] < df['Low'].iloc[-4])
+        if '9' in str(last_d['Sell_Setup']): d_perf = (df['High'].iloc[-1] > df['High'].iloc[-3] and df['High'].iloc[-1] > df['High'].iloc[-4])
         
-        # Weekly Overwrite (Strategic Priority)
-        if last_w['Buy_Countdown'] == 13: dm_data = {'tf': 'Weekly', 'type': 'BUY 13', 'target': price*1.30, 'stop': min(df_weekly['Low'].iloc[-13:])}
-        elif last_w['Sell_Countdown'] == 13: dm_data = {'tf': 'Weekly', 'type': 'SELL 13', 'target': price*0.70, 'stop': max(df_weekly['High'].iloc[-13:])}
+        # Capture ALL Signals (Perf + Imperf)
+        if last_d['Buy_Countdown'] == 13: dm_data = {'type': 'BUY 13', 'target': price*1.15, 'stop': min(df['Low'].iloc[-13:]), 'tf': 'Daily'}
+        elif last_d['Sell_Countdown'] == 13: dm_data = {'type': 'SELL 13', 'target': price*0.85, 'stop': max(df['High'].iloc[-13:]), 'tf': 'Daily'}
+        elif last_d['Buy_Setup'] == 9: dm_data = {'type': 'BUY 9', 'target': price*1.05, 'stop': min(df['Low'].iloc[-9:]), 'tf': 'Daily'}
+        elif last_d['Sell_Setup'] == 9: dm_data = {'type': 'SELL 9', 'target': price*0.95, 'stop': max(df['High'].iloc[-9:]), 'tf': 'Daily'}
         
-        if dm_data: dm_sig = dm_data
+        # Weekly
+        if last_w['Buy_Countdown'] == 13: dm_data = {'type': 'BUY 13', 'target': price*1.30, 'stop': min(df_weekly['Low'].iloc[-13:]), 'tf': 'Weekly'}
+        elif last_w['Sell_Countdown'] == 13: dm_data = {'type': 'SELL 13', 'target': price*0.70, 'stop': max(df_weekly['High'].iloc[-13:]), 'tf': 'Weekly'}
+        elif last_w['Buy_Setup'] == 9: dm_data = {'type': 'BUY 9', 'target': price*1.10, 'stop': min(df_weekly['Low'].iloc[-9:]), 'tf': 'Weekly'}
+        elif last_w['Sell_Setup'] == 9: dm_data = {'type': 'SELL 9', 'target': price*0.90, 'stop': max(df_weekly['High'].iloc[-9:]), 'tf': 'Weekly'}
         
-        # --- 2. RSI SIGNALS ---
+        if dm_data:
+            dm_sig = dm_data
+            dm_sig['perfected'] = d_perf # Tag it
+        
+        # --- RSI ---
         rsi_sig = None
-        rsi_val_d = last_d['RSI']
-        if rsi_val_d < 30: rsi_sig = {'type': 'OVERSOLD', 'val': rsi_val_d, 'target': df['Close'].rolling(20).mean().iloc[-1], 'stop': min(df['Low'].iloc[-5:])}
-        elif rsi_val_d > 70: rsi_sig = {'type': 'OVERBOUGHT', 'val': rsi_val_d, 'target': df['Close'].rolling(20).mean().iloc[-1], 'stop': max(df['High'].iloc[-5:])}
+        if last_d['RSI'] < 30: rsi_sig = {'type': 'OVERSOLD', 'val': last_d['RSI'], 'target': df['Close'].rolling(20).mean().iloc[-1]}
+        elif last_d['RSI'] > 70: rsi_sig = {'type': 'OVERBOUGHT', 'val': last_d['RSI'], 'target': df['Close'].rolling(20).mean().iloc[-1]}
         
-        # --- 3. SQUEEZE SIGNALS ---
+        # --- SQUEEZE ---
         sq_sig = None
-        if d_sq['status']: sq_sig = {'tf': 'Daily', 'move': d_sq['move']}
-        elif w_sq['status']: sq_sig = {'tf': 'Weekly', 'move': w_sq['move']}
+        if d_sq['status']: sq_sig = {'tf': 'Daily', 'move': d_sq['move'], 'bias': d_sq['bias']}
+        elif w_sq['status']: sq_sig = {'tf': 'Weekly', 'move': w_sq['move'], 'bias': w_sq['bias']}
         
         return {
             'ticker': ticker, 'price': price,
@@ -324,7 +329,6 @@ def analyze_ticker(ticker):
 if __name__ == "__main__":
     print("1. Generating Macro Report...")
     macro_data = get_shared_macro_data()
-    
     radar = get_market_radar_regime(macro_data)
     howell = get_michael_howell_update(macro_data)
     btc_layer = get_bitcoin_layer_update(macro_data)
@@ -338,68 +342,74 @@ if __name__ == "__main__":
     full_universe = list(set(STRATEGIC_TICKERS + get_top_200_cryptos() + get_top_futures() + get_sp500_tickers() + get_nasdaq_tickers()))
     print(f"Scanning {len(full_universe)} tickers...")
     
-    demark_list = []
-    rsi_list = []
-    squeeze_list = []
-    power_list = []
+    perfected_list = []; unperfected_list = []; power_list = []; rsi_list = []; squeeze_list = []
     
     for i, ticker in enumerate(full_universe):
         if i % 100 == 0: print(f"Processing {i}/{len(full_universe)}...")
         res = analyze_ticker(ticker)
         if res:
-            # Power Ranking Logic (Intersection)
-            score = 0
-            if res['demark']: score += 1; demark_list.append(res)
-            if res['rsi']: score += 1; rsi_list.append(res)
-            if res['squeeze']: score += 1; squeeze_list.append(res)
+            d = res['demark']
             
-            if score >= 2: power_list.append(res)
+            # 1. Power Rankings (MUST be Perfected + Confluence)
+            confluence = 0
+            if d and d['perfected']: confluence += 1
+            if res['rsi']: confluence += 1
+            if res['squeeze']: confluence += 1
+            if confluence >= 2: power_list.append(res)
+            
+            # 2. DeMark Sorting
+            if d:
+                if d['perfected']: perfected_list.append(res)
+                else: unperfected_list.append(res)
+            
+            # 3. Other Signals
+            if res['rsi']: rsi_list.append(res)
+            if res['squeeze']: squeeze_list.append(res)
+            
         time.sleep(0.01)
         
     # --- REPORT GENERATION ---
     msg = "🔔 **INSTITUTIONAL SCANNER RESULTS** 🔔\n"
     
-    # 1. DEMARK SIGNALS
-    if demark_list:
-        msg += "\n1️⃣ **DEMARK SIGNALS (9s & 13s)**\n"
-        demark_list.sort(key=lambda x: '13' in x['demark']['type'], reverse=True) # Priority to 13s
-        for s in demark_list[:15]: # Limit to top 15
+    # 1. POWER RANKINGS
+    if power_list:
+        msg += "\n🔥 **POWER RANKINGS (Perfected + Confluence)** 🔥\n"
+        for s in power_list[:10]:
+            msg += f"🚀 **{s['ticker']}**: ${s['price']:.2f}\n"
+            if s['demark']: msg += f"   └ DeMark: {s['demark']['type']} ({s['demark']['tf']})\n"
+            if s['rsi']: msg += f"   └ RSI: {s['rsi']['type']} ({s['rsi']['val']:.0f})\n"
+            if s['squeeze']: msg += f"   └ Squeeze: {s['squeeze']['tf']} Active\n"
+            msg += "───────────────\n"
+
+    # 2. PERFECTED DEMARK
+    if perfected_list:
+        msg += "\n✅ **PERFECTED DEMARK SIGNALS**\n"
+        perfected_list.sort(key=lambda x: '13' in x['demark']['type'], reverse=True)
+        for s in perfected_list[:15]:
             d = s['demark']
             icon = "🟢" if "BUY" in d['type'] else "🔴"
             msg += f"{icon} **{s['ticker']}**: {d['type']} ({d['tf']}) @ ${s['price']:.2f}\n"
             msg += f"   └ 🎯 Target: ${d['target']:.2f} | 🛑 Stop: ${d['stop']:.2f}\n"
 
-    # 2. RSI SIGNALS
-    if rsi_list:
-        msg += "\n2️⃣ **RSI EXTREMES (<30 or >70)**\n"
-        rsi_list.sort(key=lambda x: abs(50 - x['rsi']['val']), reverse=True) # Most extreme first
-        for s in rsi_list[:15]:
-            r = s['rsi']
-            icon = "🟢" if r['type'] == "OVERSOLD" else "🔴"
-            msg += f"{icon} **{s['ticker']}**: {r['type']} ({r['val']:.0f}) @ ${s['price']:.2f}\n"
-            msg += f"   └ 🎯 Reversion: ${r['target']:.2f} | 🛑 Stop: ${r['stop']:.2f}\n"
+    # 3. UNPERFECTED DEMARK (Watchlist)
+    if unperfected_list:
+        msg += "\n⚠️ **UNPERFECTED SIGNALS (Watchlist)**\n"
+        unperfected_list.sort(key=lambda x: '13' in x['demark']['type'], reverse=True)
+        for s in unperfected_list[:15]:
+            d = s['demark']
+            msg += f"⚪ **{s['ticker']}**: {d['type']} ({d['tf']}) - Wait for Perf.\n"
 
-    # 3. SQUEEZE SIGNALS
+    # 4. SQUEEZE SIGNALS
     if squeeze_list:
-        msg += "\n3️⃣ **VOLATILITY SQUEEZES (Coiled)**\n"
-        squeeze_list.sort(key=lambda x: x['squeeze']['tf'] == 'Weekly', reverse=True) # Weekly first
-        for s in squeeze_list[:15]:
+        msg += "\n💥 **VOLATILITY SQUEEZES**\n"
+        squeeze_list.sort(key=lambda x: x['squeeze']['tf'] == 'Weekly', reverse=True)
+        for s in squeeze_list[:10]:
             sq = s['squeeze']
-            msg += f"⚠️ **{s['ticker']}**: {sq['tf']} Squeeze @ ${s['price']:.2f}\n"
-            msg += f"   └ 💥 Exp. Move: +/- ${sq['move']:.2f}\n"
+            msg += f"⚠️ **{s['ticker']}**: {sq['tf']} Squeeze ({sq['bias']})\n"
+            msg += f"   └ Exp. Move: +/- ${sq['move']:.2f}\n"
 
-    # 4. POWER RANKINGS
-    if power_list:
-        msg += "\n⚡ **POWER RANKINGS (High Conviction)** ⚡\n"
-        for s in power_list[:10]:
-            msg += f"🔥 **{s['ticker']}**: ${s['price']:.2f}\n"
-            if s['demark']: msg += f"   └ DeMark: {s['demark']['type']}\n"
-            if s['rsi']: msg += f"   └ RSI: {s['rsi']['type']} ({s['rsi']['val']:.0f})\n"
-            if s['squeeze']: msg += f"   └ Squeeze: {s['squeeze']['tf']} Active\n"
-            msg += "───────────────\n"
-
-    if not (demark_list or rsi_list or squeeze_list):
-        msg = "No significant signals found today."
+    if not (power_list or perfected_list or unperfected_list):
+        msg = "No DeMark signals found today."
 
     send_telegram_alert(msg)
     print("Done.")

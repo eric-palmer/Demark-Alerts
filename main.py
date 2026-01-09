@@ -78,11 +78,11 @@ def format_price(price):
     if price < 1.00: return f"${price:.4f}"
     return f"${price:.2f}"
 
-# --- DATA FETCHERS ---
+# --- DATA FETCHERS (Robust Headers) ---
 def get_sp500_tickers():
     try:
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         r = requests.get(url, headers=headers)
         return [t.replace('.', '-') for t in pd.read_html(io.StringIO(r.text))[0]['Symbol'].tolist()]
     except: return []
@@ -90,7 +90,7 @@ def get_sp500_tickers():
 def get_nasdaq_tickers():
     try:
         url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         r = requests.get(url, headers=headers)
         return pd.read_html(io.StringIO(r.text))[0]['Ticker'].tolist()
     except: return []
@@ -165,7 +165,7 @@ def get_michael_howell_update(data):
         if acceleration < 0: phase = "TURBULENCE (Contraction)"; action = "Overweight: Cash / Gold"
         else: phase = "CALM (Bottoming)"; action = "Accumulate: Credit / Quality"
 
-    msg = f"🏛️ **CAPITAL WARS**\n   └ **Phase:** {phase}\n   └ **Term Premia:** {tp_trend}\n   └ **Action:** {action}"
+    msg = f"🏛️ **CAPITAL WARS (Michael Howell)**\n   └ **Phase:** {phase}\n   └ **Liquidity:** {'Expanding' if roc_med > 0 else 'Contracting'} ({roc_med*100:.2f}%)\n   └ **Term Premia:** {tp_trend} (Slope: {data['term_premia'].iloc[-1]:.2f}bps)\n   └ **Action:** {action}"
     if treasury_qe: msg += "\n   └ 🚨 **Signal:** 'Treasury QE' Active (Baton Pass)"
     return msg, phase
 
@@ -199,6 +199,10 @@ def get_onchain_update():
     try:
         btc = yf.download('BTC-USD', period="2y", progress=False)['Close']
         if isinstance(btc, pd.DataFrame): btc = btc.iloc[:, 0]
+        
+        # Check if valid data
+        if len(btc) < 200: return "⚠️ Insufficient BTC Data"
+        
         sma = btc.rolling(20).mean(); std = btc.rolling(20).std()
         bbw = ((sma + std*2) - (sma - std*2)) / sma
         bbw_rank = bbw.rolling(365).rank(pct=True).iloc[-1]
@@ -262,11 +266,12 @@ def calculate_demark(df):
 
 def analyze_ticker(ticker):
     try:
-        # DATA FIX: Longer history to ensure 200 SMA and RSI don't fail for new coins
+        # DATA FIX: 3 Years history for accurate 200 SMA
         df = yf.download(ticker, period="3y", progress=False, auto_adjust=True)
         
-        # QUALITY CONTROL: Skip "ghost" tickers with no data or 0 volume
-        if len(df) < 60 or df['Close'].iloc[-1] == 0: return None
+        # QUALITY FILTER (Eliminate Ghost Data)
+        if len(df) < 100 or df['Close'].iloc[-1] < 0.000001: return None
+        
         if isinstance(df.columns, pd.MultiIndex):
             try: df.columns = df.columns.get_level_values(0)
             except: pass
@@ -274,16 +279,15 @@ def analyze_ticker(ticker):
         df_weekly = df.resample('W-FRI').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
         
         # INDICATORS
-        # 1. MACD (12, 26, 9)
+        # 1. MACD
         exp1 = df['Close'].ewm(span=12, adjust=False).mean()
         exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-        macd = exp1 - exp2
-        signal = macd.ewm(span=9, adjust=False).mean()
-        df['MACD_Hist'] = macd - signal
+        df['MACD'] = exp1 - exp2
+        df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
         
-        # 2. ADX (14)
+        # 2. ADX
         plus_dm = df['High'].diff().clip(lower=0)
-        minus_dm = df['Low'].diff().clip(lower=0) # Simple proxy for speed
+        minus_dm = df['Low'].diff().clip(lower=0)
         tr = df['High'] - df['Low']
         atr = tr.rolling(14).mean()
         plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / atr)
@@ -295,11 +299,14 @@ def analyze_ticker(ticker):
             frame['RSI'] = calculate_rsi(frame['Close'])
             frame = calculate_demark(frame)
         
+        # Check for Bad RSI (0/100/NaN)
+        if pd.isna(df['RSI'].iloc[-1]) or df['RSI'].iloc[-1] <= 1 or df['RSI'].iloc[-1] >= 99: return None
+
         d_sq = check_squeeze(df); w_sq = check_squeeze(df_weekly)
         last_d = df.iloc[-1]; last_w = df_weekly.iloc[-1]
         price = last_d['Close']
         
-        # --- DEMARK SIGNALS ---
+        # --- SIGNALS ---
         dm_sig = None; dm_data = None
         
         # Daily
@@ -314,7 +321,6 @@ def analyze_ticker(ticker):
         elif last_w['Buy_Setup'] == 9: dm_data = {'type': 'BUY 9', 'target': price*1.10, 'stop': min(df_weekly['Low'].iloc[-9:]), 'time': 'Trend Exhaustion', 'tf': 'Weekly'}
         elif last_w['Sell_Setup'] == 9: dm_data = {'type': 'SELL 9', 'target': price*0.90, 'stop': max(df_weekly['High'].iloc[-9:]), 'time': 'Trend Exhaustion', 'tf': 'Weekly'}
         
-        # Perfection Check
         d_perf = False
         if dm_data:
             if '13' in dm_data['type']: d_perf = True
@@ -323,40 +329,41 @@ def analyze_ticker(ticker):
             dm_data['perfected'] = d_perf
             dm_sig = dm_data
         
-        # --- RSI ---
         rsi_sig = None
         if last_d['RSI'] < 30: rsi_sig = {'type': 'OVERSOLD', 'val': last_d['RSI'], 'target': df['Close'].rolling(20).mean().iloc[-1], 'stop': min(df['Low'].iloc[-5:]), 'time': 'Snapback (1-3 Days)'}
         elif last_d['RSI'] > 70: rsi_sig = {'type': 'OVERBOUGHT', 'val': last_d['RSI'], 'target': df['Close'].rolling(20).mean().iloc[-1], 'stop': max(df['High'].iloc[-5:]), 'time': 'Snapback (1-3 Days)'}
         
-        # --- SQUEEZE ---
         sq_sig = None
         if d_sq['status']: sq_sig = {'tf': 'Daily', 'move': d_sq['move'], 'bias': d_sq['bias'], 'time': 'Imminent'}
         elif w_sq['status']: sq_sig = {'tf': 'Weekly', 'move': w_sq['move'], 'bias': w_sq['bias'], 'time': 'Building'}
         
-        # --- MOMENTUM / TREND ---
+        # Portfolio Context
         sma200 = df['Close'].rolling(200).mean().iloc[-1]
         trend = "BULLISH" if price > sma200 else "BEARISH"
+        macd_val = df['MACD'].iloc[-1]
+        macd_sig = "Bullish" if macd_val > df['Signal_Line'].iloc[-1] else "Bearish"
         
-        macd_val = df['MACD_Hist'].iloc[-1]
-        macd_sig = "Bullish (Rising)" if macd_val > 0 else "Bearish (Falling)"
-        adx_val = last_d['ADX']
-        adx_sig = "Trending" if adx_val > 25 else "Choppy"
-        
-        tech_sig = {'type': f"{trend} / {macd_sig}", 'target': price + (last_d['ATR']*2), 'stop': price - (last_d['ATR']*1.5), 'time': 'Trend Following'}
+        # Cross logic for alert section
+        tech_alert = None
+        if (df['MACD'].iloc[-1] > df['Signal_Line'].iloc[-1] and df['MACD'].iloc[-2] < df['Signal_Line'].iloc[-2]): 
+            tech_alert = {'type': 'BULLISH MACD CROSS', 'target': price + (atr.iloc[-1]*2), 'stop': price - (atr.iloc[-1]*1.5), 'time': 'Trend Change'}
+        elif (df['MACD'].iloc[-1] < df['Signal_Line'].iloc[-1] and df['MACD'].iloc[-2] > df['Signal_Line'].iloc[-2]):
+            tech_alert = {'type': 'BEARISH MACD CROSS', 'target': price - (atr.iloc[-1]*2), 'stop': price + (atr.iloc[-1]*1.5), 'time': 'Trend Change'}
 
-        # Overall Verdict (Portfolio)
-        verdict = "NEUTRAL"
-        if dm_sig: verdict = dm_sig['type']
-        elif sq_sig: verdict = "PREPARE (Squeeze)"
-        elif trend == "BULLISH" and macd_val > 0: verdict = "BULLISH (Trend)"
-        elif trend == "BEARISH" and macd_val < 0: verdict = "BEARISH (Trend)"
+        # Overall Verdict
+        verdict = "HOLD"
+        if dm_sig and "BUY" in dm_sig['type']: verdict = "BUY (Signal)"
+        elif dm_sig and "SELL" in dm_sig['type']: verdict = "SELL (Signal)"
+        elif trend == "BULLISH" and macd_sig == "Bullish": verdict = "BUY (Trend)"
+        elif trend == "BEARISH" and macd_sig == "Bearish": verdict = "SELL (Trend)"
 
         count_str = f"Buy {last_d['Buy_Setup']}" if last_d['Buy_Setup'] > 0 else f"Sell {last_d['Sell_Setup']}"
         
         return {
             'ticker': ticker, 'price': price,
-            'demark': dm_sig, 'rsi': rsi_sig, 'squeeze': sq_sig, 'perfected': d_perf, 'tech': tech_sig,
-            'verdict': verdict, 'count': count_str, 'rsi_val': last_d['RSI'], 'adx': f"{adx_val:.0f} ({adx_sig})"
+            'demark': dm_sig, 'rsi': rsi_sig, 'squeeze': sq_sig, 'perfected': d_perf, 'tech': tech_alert,
+            'verdict': verdict, 'trend': trend, 'count': count_str, 
+            'rsi_val': last_d['RSI'], 'macd_sig': macd_sig, 'adx': f"{last_d['ADX']:.0f}"
         }
     except: return None
 
@@ -377,26 +384,35 @@ if __name__ == "__main__":
     
     print("2. Analyzing Portfolio...")
     port_msg = "💼 **CURRENT PORTFOLIO INTELLIGENCE** 💼\n"
+    
+    # Calculate Overall Health
+    port_data = []
+    bull_count = 0; bear_count = 0
     for ticker in CURRENT_PORTFOLIO:
         res = analyze_ticker(ticker)
         if res:
-            p = format_price(res['price'])
-            t = format_price(res['tech']['target'])
-            s = format_price(res['tech']['stop'])
-            
-            icon = "🟢" if "BUY" in res['verdict'] or "BULLISH" in res['verdict'] else "🔴" if "SELL" in res['verdict'] or "BEARISH" in res['verdict'] else "🟡"
-            
-            port_msg += f"{icon} **{ticker}**: {res['verdict']} @ {p}\n"
-            port_msg += f"   └ 📊 Techs: RSI {res['rsi_val']:.0f} | ADX {res['adx']} | {res['count']}\n"
-            port_msg += f"   └ 🎯 Target: {t} | 🛑 Stop: {s}\n"
-            port_msg += f"   └ ⏳ Timing: {res['tech']['time']}\n"
-            
-            if res['demark']: port_msg += f"   🚨 SIGNAL: {res['demark']['type']} ({'Perfected' if res['perfected'] else 'Unperfected'})\n"
-            if res['squeeze']: port_msg += f"   ⚠️ SQUEEZE: {res['squeeze']['tf']} ({res['squeeze']['bias']})\n"
-            
-            if "SLV" in ticker and "SPECULATION" in howell_phase: port_msg += "   ✅ **MACRO:** Aligned (Commodities Overweight)\n"
-            if "DJT" in ticker and "REBOUND" in howell_phase: port_msg += "   ✅ **MACRO:** Aligned (High Beta)\n"
-            port_msg += "───────────────\n"
+            port_data.append(res)
+            if "BUY" in res['verdict'] or "BULLISH" in res['verdict']: bull_count += 1
+            if "SELL" in res['verdict'] or "BEARISH" in res['verdict']: bear_count += 1
+    
+    overall = "🟢 BULLISH" if bull_count > bear_count else "🔴 BEARISH" if bear_count > bull_count else "🟡 NEUTRAL"
+    port_msg += f"**Overall Technicals:** {overall} ({bull_count} Bull / {bear_count} Bear)\n───────────────\n"
+    
+    for res in port_data:
+        p = format_price(res['price'])
+        icon = "🟢" if "BUY" in res['verdict'] else "🔴" if "SELL" in res['verdict'] else "🟡"
+        
+        port_msg += f"{icon} **{res['ticker']}**: {res['verdict']} @ {p}\n"
+        port_msg += f"   └ Trend: {res['trend']} | MACD: {res['macd_sig']} | RSI: {res['rsi_val']:.0f}\n"
+        port_msg += f"   └ DeMark: {res['count']}\n"
+        
+        if res['demark']: port_msg += f"   🚨 SIGNAL: {res['demark']['type']} ({'Perf' if res['perfected'] else 'Unperf'})\n"
+        if res['squeeze']: port_msg += f"   ⚠️ SQUEEZE: {res['squeeze']['tf']} ({res['squeeze']['bias']})\n"
+        
+        # Context
+        if "SLV" in res['ticker'] and "SPECULATION" in howell_phase: port_msg += "   ✅ **MACRO:** Aligned (Commodities Overweight)\n"
+        port_msg += "\n"
+        
     send_telegram_alert(port_msg)
     
     print("3. Scanning Tickers...")
@@ -410,67 +426,61 @@ if __name__ == "__main__":
         res = analyze_ticker(ticker)
         if res:
             d = res['demark']
-            
-            # 1. Power Rankings (Strict: Perfected + Confluence)
+            # Power Ranking
             confluence = 0
             if d and res['perfected']: confluence += 1
             if res['rsi']: confluence += 1
             if res['squeeze']: confluence += 1
-            if confluence >= 2 and d and d['perfected']: 
-                power_list.append(res)
+            if confluence >= 2 and d and res['perfected']: power_list.append(res)
             
-            # 2. DeMark Lists
+            # Lists
             if d:
                 if res['perfected']: perfected_list.append(res)
                 else: unperfected_list.append(res)
             
-            # 3. Other Signals
             if res['rsi']: rsi_list.append(res)
             if res['squeeze']: squeeze_list.append(res)
-            
-            # 4. Momentum (MACD Cross)
-            if "CROSS" in res['tech']['type']: tech_list.append(res)
+            if res['tech']: tech_list.append(res)
             
         time.sleep(0.01)
         
     # --- REPORT GENERATION ---
     msg = "🔔 **INSTITUTIONAL SCANNER RESULTS** 🔔\n"
     
-    # 1. POWER RANKINGS
     if power_list:
         msg += "\n🔥 **POWER RANKINGS (Perfected + Confluence)** 🔥\n"
         for s in power_list[:15]:
             p = format_price(s['price'])
             d = s['demark']
-            msg += f"🚀 **{s['ticker']}**: {p}\n"
-            if d: msg += f"   └ DeMark: {d['type']} ({d['tf']}) ✅\n"
-            if d: msg += f"   └ 🎯 Target: {format_price(d['target'])} | 🛑 Stop: {format_price(d['stop'])}\n"
+            msg += f"🚀 **{s['ticker']}**: {p}\n   └ DeMark: {d['type']} ({d['tf']}) ✅\n   └ 🎯 Target: {format_price(d['target'])} | 🛑 Stop: {format_price(d['stop'])}\n"
             if s['rsi']: msg += f"   └ RSI: {s['rsi']['type']} ({s['rsi']['val']:.0f})\n"
             if s['squeeze']: msg += f"   └ Squeeze: {s['squeeze']['tf']} Active ({s['squeeze']['bias']})\n"
             msg += "───────────────\n"
 
-    # 2. PERFECTED DEMARK
     if perfected_list:
         msg += "\n✅ **PERFECTED DEMARK SIGNALS**\n"
         perfected_list.sort(key=lambda x: '13' in x['demark']['type'], reverse=True)
-        for s in perfected_list[:20]:
+        for s in perfected_list[:15]:
             if s in power_list: continue 
-            d = s['demark']
-            p = format_price(s['price'])
+            d = s['demark']; p = format_price(s['price'])
             icon = "🟢" if "BUY" in d['type'] else "🔴"
-            msg += f"{icon} **{s['ticker']}**: {d['type']} ({d['tf']}) @ {p}\n"
-            msg += f"   └ 🎯 Target: {format_price(d['target'])} | 🛑 Stop: {format_price(d['stop'])}\n"
-            msg += f"   └ ⏳ Timing: {d['time']}\n"
+            msg += f"{icon} **{s['ticker']}**: {d['type']} ({d['tf']}) @ {p}\n   └ 🎯 Target: {format_price(d['target'])} | 🛑 Stop: {format_price(d['stop'])}\n   └ ⏳ Timing: {d['time']}\n"
 
-    # 3. UNPERFECTED DEMARK
+    if tech_list:
+        msg += "\n🌊 **MOMENTUM & TREND (MACD Cross)**\n"
+        for s in tech_list[:10]:
+            if s in power_list: continue
+            t = s['tech']; p = format_price(s['price'])
+            icon = "🟢" if "BULLISH" in t['type'] else "🔴"
+            msg += f"{icon} **{s['ticker']}**: {t['type']} @ {p}\n   └ 🎯 Target: {format_price(t['target'])} | 🛑 Stop: {format_price(t['stop'])}\n   └ ⏳ Timing: {t['time']}\n"
+
     if unperfected_list:
         msg += "\n⚠️ **UNPERFECTED SIGNALS (Watchlist Only)**\n"
         unperfected_list.sort(key=lambda x: '13' in x['demark']['type'], reverse=True)
-        for s in unperfected_list[:15]:
+        for s in unperfected_list[:10]:
             d = s['demark']
             msg += f"⚪ **{s['ticker']}**: {d['type']} ({d['tf']}) - Unperfected\n"
 
-    # 4. RSI SIGNALS
     if rsi_list:
         msg += "\n2️⃣ **RSI EXTREMES (<30 or >70)**\n"
         rsi_list.sort(key=lambda x: abs(50 - x['rsi']['val']), reverse=True)
@@ -478,30 +488,15 @@ if __name__ == "__main__":
             if s in power_list: continue
             r = s['rsi']; p = format_price(s['price'])
             icon = "🟢" if r['type'] == "OVERSOLD" else "🔴"
-            msg += f"{icon} **{s['ticker']}**: {r['type']} ({r['val']:.0f}) @ {p}\n"
-            msg += f"   └ 🎯 Target: {format_price(r['target'])} | 🛑 Stop: {format_price(r['stop'])}\n"
-            msg += f"   └ ⏳ Timing: {r['time']}\n"
+            msg += f"{icon} **{s['ticker']}**: {r['type']} ({r['val']:.0f}) @ {p}\n   └ 🎯 Reversion: {format_price(r['target'])}\n"
 
-    # 5. SQUEEZE SIGNALS
     if squeeze_list:
         msg += "\n3️⃣ **VOLATILITY SQUEEZES**\n"
         squeeze_list.sort(key=lambda x: x['squeeze']['tf'] == 'Weekly', reverse=True)
         for s in squeeze_list[:10]:
             if s in power_list: continue
             sq = s['squeeze']; p = format_price(s['price'])
-            msg += f"⚠️ **{s['ticker']}**: {sq['tf']} Squeeze ({sq['bias']}) @ {p}\n"
-            msg += f"   └ Exp. Move: +/- {format_price(sq['move'])}\n"
-            msg += f"   └ ⏳ Timing: {sq['time']}\n"
-
-    # 6. MOMENTUM / TREND
-    if tech_list:
-        msg += "\n🌊 **MOMENTUM SHIFTS (MACD Cross)**\n"
-        for s in tech_list[:10]:
-            if s in power_list: continue
-            t = s['tech']; p = format_price(s['price'])
-            icon = "🟢" if "BULLISH" in t['type'] else "🔴"
-            msg += f"{icon} **{s['ticker']}**: {t['type']} @ {p}\n"
-            msg += f"   └ 🎯 Target: {format_price(t['target'])} | 🛑 Stop: {format_price(t['stop'])}\n"
+            msg += f"⚠️ **{s['ticker']}**: {sq['tf']} Squeeze ({sq['bias']}) @ {p}\n   └ Exp. Move: +/- {format_price(sq['move'])}\n"
 
     if not (power_list or perfected_list or unperfected_list):
         msg = "No DeMark signals found today."

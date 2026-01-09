@@ -19,10 +19,10 @@ jobs:
           python-version: '3.11' 
 
       - name: Install libraries
-        # Added --upgrade to force the latest patches
+        # Added lxml and html5lib for Wikipedia scraping
         run: |
           pip install --upgrade pip
-          pip install --upgrade yfinance pandas requests pandas-datareader scipy numpy
+          pip install --upgrade yfinance pandas requests pandas-datareader scipy numpy lxml html5lib
 
       - name: Run Scanner
         env:

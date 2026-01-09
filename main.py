@@ -3,17 +3,21 @@ import pandas as pd
 import pandas_datareader.data as web 
 import requests
 import os
+import sys
 import time
 import io
 import datetime
 import numpy as np
+
+# --- DEBUG INFO ---
+print(f"🚀 STARTING SCANNER | Python Version: {sys.version}")
 
 # --- CONFIGURATION (INSTITUTIONAL WATCHLIST) ---
 CURRENT_PORTFOLIO = ['SLV', 'DJT']
 
 STRATEGIC_TICKERS = [
     # -- Meme / PolitiFi --
-    'DJT', 'DOGE-USD', 'SHIB-USD', 'PEPE-USD',
+    'DJT', 'PENGU-USD', 'FARTCOIN-USD', 'DOGE-USD', 'SHIB-USD', 'PEPE-USD',
     
     # -- Crypto: Coins --
     'BTC-USD', 'ETH-USD', 'SOL-USD',
@@ -67,11 +71,15 @@ def send_telegram_alert(message, header=""):
     full_msg = f"{header}\n\n{message}" if header else message
     if len(full_msg) > 4000:
         for i in range(0, len(full_msg), 4000):
-            requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
-                          json={"chat_id": chat_id, "text": full_msg[i:i+4000], "parse_mode": "Markdown"})
+            try:
+                requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
+                              json={"chat_id": chat_id, "text": full_msg[i:i+4000], "parse_mode": "Markdown"})
+            except: pass
     else:
-        requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
-                      json={"chat_id": chat_id, "text": full_msg, "parse_mode": "Markdown"})
+        try:
+            requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
+                          json={"chat_id": chat_id, "text": full_msg, "parse_mode": "Markdown"})
+        except: pass
 
 def format_price(price):
     if price < 0.01: return f"${price:.6f}"
@@ -82,7 +90,7 @@ def format_price(price):
 def get_sp500_tickers():
     try:
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers)
         return [t.replace('.', '-') for t in pd.read_html(io.StringIO(r.text))[0]['Symbol'].tolist()]
     except: return []
@@ -90,7 +98,7 @@ def get_sp500_tickers():
 def get_nasdaq_tickers():
     try:
         url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers)
         return pd.read_html(io.StringIO(r.text))[0]['Ticker'].tolist()
     except: return []
@@ -116,7 +124,7 @@ def get_top_futures():
     ]
 
 # ==========================================================
-#  SHARED MACRO DATA
+#  MACRO ENGINES
 # ==========================================================
 def get_shared_macro_data():
     try:
@@ -133,18 +141,15 @@ def get_shared_macro_data():
     except Exception as e:
         print(f"Data Fetch Error: {e}"); return None
 
-# ==========================================================
-#  MACRO ENGINES
-# ==========================================================
 def get_market_radar_regime(data):
     if not data: return "⚠️ Data Error", "NEUTRAL"
     liq_momo = data['net_liq'].pct_change(63).iloc[-1] * 100
     growth_momo = data['spy'].pct_change(126).iloc[-1] * 100
     
+    regime = "RISK OFF"
     if liq_momo > 0 and growth_momo > 0: regime = "RISK ON"
     elif liq_momo > 0 and growth_momo < 0: regime = "ACCUMULATE"
     elif liq_momo < 0 and growth_momo < 0: regime = "SLOW DOWN"
-    else: regime = "RISK OFF"
     
     icon = "🟢" if regime == "RISK ON" else "🔵" if regime == "ACCUMULATE" else "🟠" if regime == "SLOW DOWN" else "🔴"
     return f"{icon} **{regime}**\n   └ Liq: {liq_momo:.2f}% | Growth: {growth_momo:.2f}%", regime
@@ -158,6 +163,7 @@ def get_michael_howell_update(data):
     fed_trend = data['fed_assets'].pct_change(63).iloc[-1]
     treasury_qe = (roc_med > -0.01 and fed_trend < 0)
 
+    phase = "NEUTRAL"; action = "Hold"
     if roc_med > 0:
         if acceleration > 0: phase = "REBOUND (Early Cycle)"; action = "Overweight: Tech / Crypto / High Beta"
         else: phase = "SPECULATION (Late Cycle)"; action = "Overweight: Energy / Commodities / Bonds"
@@ -199,6 +205,8 @@ def get_onchain_update():
     try:
         btc = yf.download('BTC-USD', period="2y", progress=False)['Close']
         if isinstance(btc, pd.DataFrame): btc = btc.iloc[:, 0]
+        if len(btc) < 200: return "⚠️ Insufficient BTC Data"
+        
         sma = btc.rolling(20).mean(); std = btc.rolling(20).std()
         bbw = ((sma + std*2) - (sma - std*2)) / sma
         bbw_rank = bbw.rolling(365).rank(pct=True).iloc[-1]
@@ -209,7 +217,7 @@ def get_onchain_update():
     except: return "⚠️ On-Chain Error"
 
 # ==========================================================
-#  ENGINE 6: TECHNICAL INDICATORS
+#  ENGINE 6: TECHNICALS & ANALYSIS (CRASH-PROOFED)
 # ==========================================================
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -265,16 +273,19 @@ def analyze_ticker(ticker, is_portfolio=False):
         # DATA FIX: 3 Years history for accurate 200 SMA
         df = yf.download(ticker, period="3y", progress=False, auto_adjust=True)
         
-        # QUALITY FILTER: Strict check for empty dataframes or zero volume
+        # QUALITY FILTER: Critical Crash Prevention
         if len(df) < 50: return None
-        if not is_portfolio and (df['Volume'].iloc[-5:].sum() == 0 or df['Close'].iloc[-1] < 0.00000001): return None
+        if not is_portfolio:
+            if df['Volume'].iloc[-5:].sum() == 0: return None # No volume = dead
+            if df['Close'].iloc[-1] < 0.00000001: return None # Dust
         
         if isinstance(df.columns, pd.MultiIndex):
             try: df.columns = df.columns.get_level_values(0)
             except: pass
 
         df_weekly = df.resample('W-FRI').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
-        
+        if len(df_weekly) < 20: return None
+
         # INDICATORS
         # 1. MACD
         exp1 = df['Close'].ewm(span=12, adjust=False).mean()
@@ -406,7 +417,6 @@ if __name__ == "__main__":
         if res['demark']: port_msg += f"   🚨 SIGNAL: {res['demark']['type']} ({'Perf' if res['perfected'] else 'Unperf'})\n"
         if res['squeeze']: port_msg += f"   ⚠️ SQUEEZE: {res['squeeze']['tf']} ({res['squeeze']['bias']})\n"
         
-        # Context
         if "SLV" in res['ticker'] and "SPECULATION" in howell_phase: port_msg += "   ✅ **MACRO:** Aligned (Commodities Overweight)\n"
         port_msg += "\n"
         
@@ -424,15 +434,13 @@ if __name__ == "__main__":
         if res:
             d = res['demark']
             
-            # 1. Power Rankings (Strict: Perfected + Confluence)
+            # Power Ranking
             confluence = 0
             if d and res['perfected']: confluence += 1
             if res['rsi']: confluence += 1
             if res['squeeze']: confluence += 1
-            if confluence >= 2 and d and d['perfected']: 
-                power_list.append(res)
+            if confluence >= 2 and d and res['perfected']: power_list.append(res)
             
-            # 2. DeMark Lists
             if d:
                 if res['perfected']: perfected_list.append(res)
                 else: unperfected_list.append(res)
@@ -446,20 +454,16 @@ if __name__ == "__main__":
     # --- REPORT GENERATION ---
     msg = "🔔 **INSTITUTIONAL SCANNER RESULTS** 🔔\n"
     
-    # 1. POWER RANKINGS
     if power_list:
         msg += "\n🔥 **POWER RANKINGS (Perfected + Confluence)** 🔥\n"
         for s in power_list[:15]:
             p = format_price(s['price'])
             d = s['demark']
-            msg += f"🚀 **{s['ticker']}**: {p}\n"
-            if d: msg += f"   └ DeMark: {d['type']} ({d['tf']}) ✅\n"
-            if d: msg += f"   └ 🎯 Target: {format_price(d['target'])} | 🛑 Stop: {format_price(d['stop'])}\n"
+            msg += f"🚀 **{s['ticker']}**: {p}\n   └ DeMark: {d['type']} ({d['tf']}) ✅\n   └ 🎯 Target: {format_price(d['target'])} | 🛑 Stop: {format_price(d['stop'])}\n"
             if s['rsi']: msg += f"   └ RSI: {s['rsi']['type']} ({s['rsi']['val']:.0f})\n"
             if s['squeeze']: msg += f"   └ Squeeze: {s['squeeze']['tf']} Active ({s['squeeze']['bias']})\n"
             msg += "───────────────\n"
 
-    # 2. PERFECTED DEMARK
     if perfected_list:
         msg += "\n✅ **PERFECTED DEMARK SIGNALS**\n"
         perfected_list.sort(key=lambda x: '13' in x['demark']['type'], reverse=True)
@@ -467,11 +471,16 @@ if __name__ == "__main__":
             if s in power_list: continue 
             d = s['demark']; p = format_price(s['price'])
             icon = "🟢" if "BUY" in d['type'] else "🔴"
-            msg += f"{icon} **{s['ticker']}**: {d['type']} ({d['tf']}) @ {p}\n"
-            msg += f"   └ 🎯 Target: {format_price(d['target'])} | 🛑 Stop: {format_price(d['stop'])}\n"
-            msg += f"   └ ⏳ Timing: {d['time']}\n"
+            msg += f"{icon} **{s['ticker']}**: {d['type']} ({d['tf']}) @ {p}\n   └ 🎯 Target: {format_price(d['target'])} | 🛑 Stop: {format_price(d['stop'])}\n   └ ⏳ Timing: {d['time']}\n"
 
-    # 3. UNPERFECTED DEMARK (Watchlist)
+    if tech_list:
+        msg += "\n🌊 **MOMENTUM & TREND (MACD Cross)**\n"
+        for s in tech_list[:10]:
+            if s in power_list: continue
+            t = s['tech']; p = format_price(s['price'])
+            icon = "🟢" if "BULLISH" in t['type'] else "🔴"
+            msg += f"{icon} **{s['ticker']}**: {t['type']} @ {p}\n   └ 🎯 Target: {format_price(t['target'])} | 🛑 Stop: {format_price(t['stop'])}\n   └ ⏳ Timing: {t['time']}\n"
+
     if unperfected_list:
         msg += "\n⚠️ **UNPERFECTED SIGNALS (Watchlist Only)**\n"
         unperfected_list.sort(key=lambda x: '13' in x['demark']['type'], reverse=True)
@@ -479,7 +488,6 @@ if __name__ == "__main__":
             d = s['demark']
             msg += f"⚪ **{s['ticker']}**: {d['type']} ({d['tf']}) - Unperfected\n"
 
-    # 4. RSI SIGNALS
     if rsi_list:
         msg += "\n2️⃣ **RSI EXTREMES (<30 or >70)**\n"
         rsi_list.sort(key=lambda x: abs(50 - x['rsi']['val']), reverse=True)
@@ -487,31 +495,15 @@ if __name__ == "__main__":
             if s in power_list: continue
             r = s['rsi']; p = format_price(s['price'])
             icon = "🟢" if r['type'] == "OVERSOLD" else "🔴"
-            msg += f"{icon} **{s['ticker']}**: {r['type']} ({r['val']:.0f}) @ {p}\n"
-            msg += f"   └ 🎯 Reversion: {format_price(r['target'])}\n"
-            msg += f"   └ ⏳ Timing: {r['time']}\n"
+            msg += f"{icon} **{s['ticker']}**: {r['type']} ({r['val']:.0f}) @ {p}\n   └ 🎯 Reversion: {format_price(r['target'])}\n"
 
-    # 5. SQUEEZE SIGNALS
     if squeeze_list:
         msg += "\n3️⃣ **VOLATILITY SQUEEZES**\n"
         squeeze_list.sort(key=lambda x: x['squeeze']['tf'] == 'Weekly', reverse=True)
         for s in squeeze_list[:10]:
             if s in power_list: continue
             sq = s['squeeze']; p = format_price(s['price'])
-            msg += f"⚠️ **{s['ticker']}**: {sq['tf']} Squeeze ({sq['bias']}) @ {p}\n"
-            msg += f"   └ Exp. Move: +/- {format_price(sq['move'])}\n"
-            msg += f"   └ ⏳ Timing: {sq['time']}\n"
-
-    # 6. MOMENTUM / TREND
-    if tech_list:
-        msg += "\n🌊 **MOMENTUM & TREND (MACD Cross)**\n"
-        for s in tech_list[:10]:
-            if s in power_list: continue
-            t = s['tech']; p = format_price(s['price'])
-            icon = "🟢" if "BULLISH" in t['type'] else "🔴"
-            msg += f"{icon} **{s['ticker']}**: {t['type']} @ {p}\n"
-            msg += f"   └ 🎯 Target: {format_price(t['target'])} | 🛑 Stop: {format_price(t['stop'])}\n"
-            msg += f"   └ ⏳ Timing: {t['time']}\n"
+            msg += f"⚠️ **{s['ticker']}**: {sq['tf']} Squeeze ({sq['bias']}) @ {p}\n   └ Exp. Move: +/- {format_price(sq['move'])}\n"
 
     if not (power_list or perfected_list or unperfected_list):
         msg = "No DeMark signals found today."

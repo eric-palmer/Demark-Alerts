@@ -8,9 +8,9 @@ import io
 import datetime
 import numpy as np
 
-# --- INSTITUTIONAL WATCHLIST ---
+# --- CONFIGURATION (CUSTOM WATCHLIST) ---
 STRATEGIC_TICKERS = [
-    # -- Meme / PolitiFi / Specific Coins --
+    # -- Meme / PolitiFi --
     'DJT', 'PENGU-USD', 'FARTCOIN-USD', 'DOGE-USD', 'SHIB-USD', 'PEPE-USD',
     
     # -- Crypto: Coins --
@@ -27,14 +27,14 @@ STRATEGIC_TICKERS = [
     'CRCL',
     
     # -- Commodities (Futures & Proxies) --
-    'GC=F', 'SI=F', 'CL=F', 'NG=F', 'HG=F', 'PL=F', 'PA=F', # Futures
+    'GC=F', 'SI=F', 'CL=F', 'NG=F', 'HG=F', 'PL=F', 'PA=F',
     'GLD', 'SLV', 'PALL', 'PPLT', 'NIKL', 'LIT', 'ILIT', 'REMX',
     
-    # -- Energy, Uranium & Grid --
+    # -- Energy / Grid / Uranium --
     'VOLT', 'GRID', 'EQT', 'TAC', 'BE', 'OKLO', 'SMR', 'NEE', 
     'URA', 'SRUUF', 'CCJ', 'KAMJY', 'UNL',
     
-    # -- Tech, AI & Mag 7 --
+    # -- Tech / AI / Mag 7 --
     'NVDA', 'SMH', 'SMHX', 'TSM', 'AVGO', 'QCOM', 'MU', 'AMD', 'TER', 
     'NOW', 'AXON', 'SNOW', 'PLTR', 'GOOG', 'MSFT', 'META', 'AMZN', 'AAPL',
     'TSLA', 'NFLX', 'SPOT', 'SHOP', 'UBER', 'DASH', 'NET', 'DXCM', 'ETSY',
@@ -71,7 +71,7 @@ def send_telegram_alert(message, header=""):
         requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
                       json={"chat_id": chat_id, "text": full_msg, "parse_mode": "Markdown"})
 
-# --- DATA FETCHERS (Restored & Validated) ---
+# --- DATA FETCHERS ---
 def get_sp500_tickers():
     try:
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
@@ -89,7 +89,6 @@ def get_nasdaq_tickers():
     except: return []
 
 def get_top_200_cryptos():
-    """Fetches Top 200 Cryptos by Market Cap (CoinGecko)"""
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {'vs_currency': 'usd', 'order': 'market_cap_desc', 'per_page': 250, 'page': 1}
@@ -99,121 +98,146 @@ def get_top_200_cryptos():
     except: return ['BTC-USD', 'ETH-USD', 'SOL-USD', 'BNB-USD', 'XRP-USD']
 
 # ==========================================================
-#  ENGINE 1: MARKET RADAR (Regime Model)
+#  ENGINE 1: BTC MACRO SENSITIVITY (Capital Flows)
 # ==========================================================
-def get_market_radar_regime():
+def get_btc_macro_sensitivity():
     """
-    Real Vision / Market Radar Framework:
-    Tracks the 'Everything Code' divergence.
-    - Liquidity Leads Growth.
-    - The 'Sweet Spot' (Banana Zone) is Liq UP + Growth DOWN/FLAT.
+    Capital Flows Framework:
+    Bitcoin reacts to:
+    1. Inflation Swaps (Proxy: 5Y Breakeven Inflation 'T5YIE')
+    2. Term Premia (Proxy: Yield Curve Slope 10Y-2Y or ACM Term Premia)
+    3. Net Liquidity Velocity
     """
     try:
         start = datetime.datetime.now() - datetime.timedelta(days=400)
-        # Forward fill to handle FRED reporting lags (Crucial Fix)
+        
+        # FRED Data: 5Y Breakeven (Inflation) & 10Y Yield
+        fred = web.DataReader(['T5YIE', 'DGS10', 'DGS2'], 'fred', start, datetime.datetime.now())
+        fred = fred.resample('D').ffill().dropna()
+        
+        # 1. Inflation Expectations (The "Debasement" Trade)
+        inflation_exp = fred['T5YIE'].iloc[-1]
+        inflation_trend = fred['T5YIE'].pct_change(20).iloc[-1] # Monthly trend
+        
+        # 2. Term Premia Proxy (Steepener vs Flattener)
+        # Rising Term Premia (Steepening) often hurts risk assets initially unless driven by inflation
+        term_premia_proxy = fred['DGS10'].iloc[-1] - fred['DGS2'].iloc[-1]
+        tp_trend = "RISING (Bearish Duration)" if term_premia_proxy > fred['DGS10'].iloc[-20] - fred['DGS2'].iloc[-20] else "FALLING (Bullish Duration)"
+        
+        # 3. Bitcoin Signal
+        # BTC loves: Rising Inflation Exp + Stable/Falling Real Rates (Liquidity)
+        btc_signal = ""
+        if inflation_trend > 0:
+            btc_signal = "🟢 **BULLISH** (Inflation Expectations Rising)"
+        elif inflation_trend < 0:
+            btc_signal = "🔴 **BEARISH** (Disinflation / Cooling)"
+        else:
+            btc_signal = "⚪ **NEUTRAL**"
+            
+        return f"🪙 **BITCOIN MACRO SENSITIVITY**\n   └ **Signal:** {btc_signal}\n   └ **Inflation Swaps (5Y):** {inflation_exp:.2f}% ({'Up' if inflation_trend > 0 else 'Down'})\n   └ **Term Premia:** {tp_trend}"
+    
+    except Exception as e: return f"⚠️ BTC Macro Error: {e}"
+
+# ==========================================================
+#  ENGINE 2: MICHAEL HOWELL (Dynamic Cycle)
+# ==========================================================
+def get_michael_howell_update():
+    """
+    Dynamic Liquidity Cycle (No Hardcoding).
+    Based on Rate of Change (RoC) of Global Liquidity Proxy.
+    """
+    try:
+        start = datetime.datetime.now() - datetime.timedelta(days=500)
         fred = web.DataReader(['WALCL', 'WTREGEN', 'RRPONTSYD'], 'fred', start, datetime.datetime.now())
         fred = fred.resample('D').ffill().dropna()
         
-        # Net Liquidity = Fed Assets - TGA - RRP
         net_liq = (fred['WALCL'] / 1000) - fred['WTREGEN'] - fred['RRPONTSYD']
         
-        # Growth Proxy: SPY Price Action (Real Vision standard)
+        # Momentum (63-day RoC)
+        roc_med = net_liq.pct_change(63).iloc[-1]
+        
+        # Acceleration (Is the RoC increasing or decreasing?)
+        roc_prev = net_liq.pct_change(63).iloc[-20]
+        acceleration = roc_med - roc_prev
+        
+        # Dynamic Phase Determination
+        phase = ""
+        action = ""
+        
+        if roc_med > 0 and acceleration > 0:
+            phase = "REBOUND (Accelerating)"
+            action = "Overweight: Tech / Crypto / High Beta"
+        elif roc_med > 0 and acceleration < 0:
+            phase = "SPECULATION (Peaking / Slowing)"
+            action = "Overweight: Commodities / Energy / 5Y Bonds"
+        elif roc_med < 0 and acceleration < 0:
+            phase = "TURBULENCE (Contraction)"
+            action = "Overweight: Cash / Gold / Volatility"
+        elif roc_med < 0 and acceleration > 0:
+            phase = "CALM (Bottoming)"
+            action = "Accumulate: Credit / Quality Equities"
+            
+        return f"🏛️ **CAPITAL WARS (Michael Howell)**\n   └ **Phase:** {phase}\n   └ **Trend:** {'Expanding' if roc_med > 0 else 'Contracting'} ({roc_med*100:.2f}%)\n   └ **Action:** {action}"
+    except: return "⚠️ Howell Engine Error"
+
+# ==========================================================
+#  ENGINE 3: THE BITCOIN LAYER (Liquidity Velocity)
+# ==========================================================
+def get_bitcoin_layer_update():
+    """
+    Focus: Velocity (Acceleration) of Liquidity.
+    BTC follows the 2nd Derivative.
+    """
+    try:
+        start = datetime.datetime.now() - datetime.timedelta(days=400)
+        fred = web.DataReader(['WALCL', 'WTREGEN', 'RRPONTSYD'], 'fred', start, datetime.datetime.now())
+        fred = fred.resample('D').ffill().dropna()
+        net_liq = (fred['WALCL'] / 1000) - fred['WTREGEN'] - fred['RRPONTSYD']
+        
+        # Velocity Calculation (2nd Derivative)
+        velocity = net_liq.diff().diff().rolling(window=10).mean().iloc[-1]
+        
+        signal = ""
+        if velocity > 0:
+            signal = "🟢 HIGH VELOCITY (Impulse Up)"
+        else:
+            signal = "🟡 LOW VELOCITY (Stalling/Drag)"
+            
+        return f"🟠 **THE BITCOIN LAYER**\n   └ **Velocity:** {signal}\n   └ **Metric:** 2nd Derivative of Net Liq"
+    except: return "⚠️ Bitcoin Layer Error"
+
+# ==========================================================
+#  ENGINE 4: REAL VISION (The Everything Code)
+# ==========================================================
+def get_real_vision_update():
+    try:
+        start = datetime.datetime.now() - datetime.timedelta(days=400)
+        fred = web.DataReader(['WALCL', 'WTREGEN', 'RRPONTSYD'], 'fred', start, datetime.datetime.now())
+        fred = fred.resample('D').ffill().dropna()
+        net_liq = (fred['WALCL'] / 1000) - fred['WTREGEN'] - fred['RRPONTSYD']
         spy = yf.download('SPY', start=start, progress=False)['Close']
         if isinstance(spy, pd.DataFrame): spy = spy.iloc[:, 0]
         
-        # 3-Month Momentum (63 trading days)
-        liq_momo = net_liq.pct_change(63).iloc[-1] * 100
-        growth_momo = spy.pct_change(63).iloc[-1] * 100
+        liq_momo = net_liq.pct_change(63).iloc[-1]
+        growth_momo = spy.pct_change(63).iloc[-1]
         
-        if np.isnan(liq_momo): return "⚠️ Market Radar: Data Delayed (Fed Reporting Lag)"
-
-        if liq_momo > 0 and growth_momo > 0:
-            return f"🟢 **REGIME: RISK ON (Reflation)**\n   └ Liq: {liq_momo:.2f}% | Growth: {growth_momo:.2f}%"
-        elif liq_momo > 0 and growth_momo <= 0:
-            return f"🍌 **REGIME: ACCUMULATE (Banana Zone)**\n   └ Liq: {liq_momo:.2f}% | Growth: {growth_momo:.2f}%\n   └ Note: Liquidity expanding against weak growth (The Everything Code)."
+        regime = ""
+        if liq_momo > 0 and growth_momo <= 0:
+            regime = "🍌 **BANANA ZONE** (Liq UP / Growth DOWN)"
+        elif liq_momo > 0 and growth_momo > 0:
+            regime = "🟢 **SPRING/SUMMER** (Risk On)"
         elif liq_momo < 0 and growth_momo < 0:
-            return f"🟠 **REGIME: SLOW DOWN (Deflation)**\n   └ Liq: {liq_momo:.2f}% | Growth: {growth_momo:.2f}%"
+            regime = "🍂 **FALL** (Slowdown)"
         else:
-            return f"🔴 **REGIME: RISK OFF (Turbulence)**\n   └ Liq: {liq_momo:.2f}% | Growth: {growth_momo:.2f}%\n   └ Warning: Liquidity contracting while prices stay high."
-    except Exception as e: return f"⚠️ Market Radar Error: {e}"
-
-# ==========================================================
-#  ENGINE 2: CAPITAL WARS (Howell / Bhatia)
-# ==========================================================
-def get_capital_wars_update():
-    """
-    Synthesizes Michael Howell (CrossBorder Capital) and Nik Bhatia.
-    - Checks for 'Treasury QE' (Baton Pass)
-    - Checks Bond Volatility (Collateral Stress)
-    """
-    try:
-        start = datetime.datetime.now() - datetime.timedelta(days=400)
-        fred = web.DataReader(['WALCL', 'WTREGEN', 'RRPONTSYD'], 'fred', start, datetime.datetime.now())
-        fred = fred.resample('D').ffill().dropna()
-        
-        # Components (Billions)
-        fed_assets = fred['WALCL'] / 1000
-        net_liq = fed_assets - fred['WTREGEN'] - fred['RRPONTSYD']
-        
-        # Bond Volatility Proxy (TLT Standard Deviation - 20 day)
-        tlt = yf.download('TLT', period="1y", progress=False)['Close']
-        if isinstance(tlt, pd.DataFrame): tlt = tlt.iloc[:, 0]
-        bond_vol = tlt.pct_change().rolling(20).std().iloc[-1]
-        
-        # Trends
-        liq_trend_short = net_liq.pct_change(20).iloc[-1]
-        liq_trend_long = net_liq.pct_change(60).iloc[-1]
-        fed_trend = fed_assets.pct_change(60).iloc[-1]
-        
-        # Phase Logic (Howell Cycle)
-        phase = ""
-        action = ""
-        if liq_trend_long > 0:
-            if liq_trend_short > 0:
-                phase = "SPECULATION (Late Cycle)"
-                action = "Assets: Hard Assets (BTC/Gold) & Tech"
-            else:
-                phase = "CALM (Mid Cycle)"
-                action = "Assets: Quality Equity / Credit"
-        else:
-            if liq_trend_short > 0:
-                phase = "REBOUND (Early Cycle)"
-                action = "Assets: Gov Bonds / Early Tech (Airbag)"
-            else:
-                phase = "TURBULENCE (Crisis)"
-                action = "Assets: Cash / Gold / Volatility"
-
-        # The "Baton Pass" Detector (Howell Key Insight)
-        # Net Liq UP + Fed Assets FLAT/DOWN = Janet Yellen Treasury QE
-        treasury_qe = (liq_trend_long > 0 and fed_trend <= 0.01)
-        
-        # Bond Stress Warning (Collateral Haircuts)
-        collateral_stress = bond_vol > 0.015 # 1.5% daily vol is high for bonds
+            regime = "❄️ **WINTER** (Risk Off)"
             
-        msg = f"🌊 **LIQUIDITY CYCLE: {phase}**\n"
-        msg += f"   └ Action: {action}\n"
-        
-        if treasury_qe:
-            msg += "   └ 🚨 **Signal:** 'Treasury QE' Active (Baton Pass)\n"
-            msg += "      (Treasury bills offsetting Fed QT)"
-        elif liq_trend_long > 0 and fed_trend > 0:
-             msg += "   └ Signal: Full Fed QE (Balance Sheet Expansion)"
-        else:
-             msg += "   └ Signal: Standard Flows"
-             
-        if collateral_stress:
-            msg += "\n   └ ⚠️ **WARNING:** Bond Volatility High (Collateral Stress)"
-             
-        return msg
-    except: return "⚠️ Liquidity Data Unavailable"
+        return f"🧠 **REAL VISION**\n   └ **Regime:** {regime}"
+    except: return "⚠️ Real Vision Error"
 
 # ==========================================================
-#  ENGINE 3: DEMARK STOCK SCANNER (Institutional)
+#  ENGINE 5: DEMARK STOCK SCANNER
 # ==========================================================
 def calculate_demark(df):
-    """
-    Strict TD Sequential Logic with Cancellation & Recycling.
-    """
     df['Close_4'] = df['Close'].shift(4)
     df['Buy_Setup'] = 0; df['Sell_Setup'] = 0
     df['Buy_Countdown'] = 0; df['Sell_Countdown'] = 0
@@ -228,7 +252,6 @@ def calculate_demark(df):
     lows = df['Low'].values; highs = df['High'].values
     
     for i in range(4, len(df)):
-        # 1. SETUP PHASE
         if closes[i] < closes_4[i]: buy_seq += 1
         else: buy_seq = 0
         df.iloc[i, df.columns.get_loc('Buy_Setup')] = buy_seq
@@ -237,35 +260,30 @@ def calculate_demark(df):
         else: sell_seq = 0
         df.iloc[i, df.columns.get_loc('Sell_Setup')] = sell_seq
         
-        # 2. SEQUENTIAL LOGIC (Restart / Cancel)
-        # If a NEW Setup 9 completes, it resets any running Countdown
         if buy_seq == 9:
             active_buy = True; buy_cd = 0; buy_idxs = []
-            active_sell = False # Contrary setup cancels previous
+            active_sell = False
         if sell_seq == 9:
             active_sell = True; sell_cd = 0; sell_idxs = []
             active_buy = False
 
-        # 3. COUNTDOWN PHASE
         if active_buy:
             if closes[i] <= lows[i-2]:
                 buy_cd += 1; buy_idxs.append(i)
                 df.iloc[i, df.columns.get_loc('Buy_Countdown')] = buy_cd
                 if buy_cd == 13:
-                    # Perfection: Low of 13 <= Close of 8
                     if len(buy_idxs) >= 8 and lows[i] <= closes[buy_idxs[7]]:
                         df.iloc[i, df.columns.get_loc('Buy_13_Perfected')] = True
-                    active_buy = False # Complete
+                    active_buy = False
 
         if active_sell:
             if closes[i] >= highs[i-2]:
                 sell_cd += 1; sell_idxs.append(i)
                 df.iloc[i, df.columns.get_loc('Sell_Countdown')] = sell_cd
                 if sell_cd == 13:
-                    # Perfection: High of 13 >= Close of 8
                     if len(sell_idxs) >= 8 and highs[i] >= closes[sell_idxs[7]]:
                         df.iloc[i, df.columns.get_loc('Sell_13_Perfected')] = True
-                    active_sell = False # Complete
+                    active_sell = False
     return df
 
 def analyze_ticker(ticker):
@@ -285,12 +303,11 @@ def analyze_ticker(ticker):
         
         signal = None
         
-        # Priority: 13 -> 9
         if last['Buy_Countdown'] == 13:
             signal = {
                 'ticker': ticker, 'type': 'BUY', 'algo': 'COUNTDOWN 13',
                 'price': price, 'perfected': last['Buy_13_Perfected'],
-                'action': 'ACCUMULATE (Bottom)', 'timing': 'Weeks',
+                'action': 'ACCUMULATE', 'timing': 'Weeks',
                 'stop': min(df['Low'].iloc[-13:]), 'target': price * 1.15,
                 'trend': 'Bullish' if price > sma else 'Bearish'
             }
@@ -298,14 +315,13 @@ def analyze_ticker(ticker):
             signal = {
                 'ticker': ticker, 'type': 'SELL', 'algo': 'COUNTDOWN 13',
                 'price': price, 'perfected': last['Sell_13_Perfected'],
-                'action': 'DISTRIBUTE (Top)', 'timing': 'Weeks',
+                'action': 'DISTRIBUTE', 'timing': 'Weeks',
                 'stop': max(df['High'].iloc[-13:]), 'target': price * 0.85,
                 'trend': 'Bullish' if price > sma else 'Bearish'
             }
         elif last['Buy_Setup'] == 9:
             stop = min(df['Low'].iloc[-9:])
             risk = max(price - stop, price * 0.01)
-            # Perfection Logic
             l9, l8, l7, l6 = df['Low'].iloc[-1], df['Low'].iloc[-2], df['Low'].iloc[-3], df['Low'].iloc[-4]
             perf = (l9 < l7 and l9 < l6) or (l8 < l7 and l8 < l6)
             
@@ -336,15 +352,16 @@ def analyze_ticker(ticker):
 #  MAIN EXECUTION
 # ==========================================================
 if __name__ == "__main__":
-    print("1. Generating Institutional Macro Report...")
-    radar = get_market_radar_regime()
-    cap_wars = get_capital_wars_update()
+    print("1. Generating Macro Report...")
+    btc_macro = get_btc_macro_sensitivity()
+    howell = get_michael_howell_update()
+    bitcoin = get_bitcoin_layer_update()
+    rv = get_real_vision_update()
     
-    macro_msg = f"🌍 **GLOBAL MACRO INSIGHTS** 🌍\n\n{radar}\n\n{cap_wars}\n───────────────"
+    macro_msg = f"🌍 **GLOBAL MACRO INSIGHTS** 🌍\n\n{howell}\n\n{btc_macro}\n\n{bitcoin}\n\n{rv}\n───────────────"
     send_telegram_alert(macro_msg)
     
     print("2. Fetching Ticker Universe...")
-    # Fetch Top 200 Crypto + S&P 500 + Nasdaq + Custom List
     top_crypto = get_top_200_cryptos()
     sp500 = get_sp500_tickers()
     nasdaq = get_nasdaq_tickers()
@@ -357,10 +374,9 @@ if __name__ == "__main__":
         if i % 100 == 0: print(f"Processing {i}/{len(full_universe)}...")
         res = analyze_ticker(ticker)
         if res: signals.append(res)
-        time.sleep(0.01) # Small delay to respect API limits
+        time.sleep(0.01)
         
     if signals:
-        # Sort by Importance: 13s -> 9s
         signals.sort(key=lambda x: (x['algo'] == 'SETUP 9', x['type']))
         
         stock_msg = "🔔 **DEMARK SIGNALS (INSTITUTIONAL)** 🔔\n"

@@ -97,117 +97,117 @@ def get_top_200_cryptos():
         return [f"{c['symbol'].upper()}-USD" for c in data][:200]
     except: return ['BTC-USD', 'ETH-USD', 'SOL-USD', 'BNB-USD', 'XRP-USD']
 
-# ==========================================================
-#  ENGINE 1: BTC MACRO SENSITIVITY (Capital Flows)
-# ==========================================================
-def get_btc_macro_sensitivity():
-    """
-    Capital Flows Framework:
-    Bitcoin reacts to:
-    1. Inflation Swaps (Proxy: 5Y Breakeven Inflation 'T5YIE')
-    2. Term Premia (Proxy: Yield Curve Slope 10Y-2Y or ACM Term Premia)
-    3. Net Liquidity Velocity
-    """
-    try:
-        start = datetime.datetime.now() - datetime.timedelta(days=400)
-        
-        # FRED Data: 5Y Breakeven (Inflation) & 10Y Yield
-        fred = web.DataReader(['T5YIE', 'DGS10', 'DGS2'], 'fred', start, datetime.datetime.now())
-        fred = fred.resample('D').ffill().dropna()
-        
-        # 1. Inflation Expectations (The "Debasement" Trade)
-        inflation_exp = fred['T5YIE'].iloc[-1]
-        inflation_trend = fred['T5YIE'].pct_change(20).iloc[-1] # Monthly trend
-        
-        # 2. Term Premia Proxy (Steepener vs Flattener)
-        # Rising Term Premia (Steepening) often hurts risk assets initially unless driven by inflation
-        term_premia_proxy = fred['DGS10'].iloc[-1] - fred['DGS2'].iloc[-1]
-        tp_trend = "RISING (Bearish Duration)" if term_premia_proxy > fred['DGS10'].iloc[-20] - fred['DGS2'].iloc[-20] else "FALLING (Bullish Duration)"
-        
-        # 3. Bitcoin Signal
-        # BTC loves: Rising Inflation Exp + Stable/Falling Real Rates (Liquidity)
-        btc_signal = ""
-        if inflation_trend > 0:
-            btc_signal = "🟢 **BULLISH** (Inflation Expectations Rising)"
-        elif inflation_trend < 0:
-            btc_signal = "🔴 **BEARISH** (Disinflation / Cooling)"
-        else:
-            btc_signal = "⚪ **NEUTRAL**"
-            
-        return f"🪙 **BITCOIN MACRO SENSITIVITY**\n   └ **Signal:** {btc_signal}\n   └ **Inflation Swaps (5Y):** {inflation_exp:.2f}% ({'Up' if inflation_trend > 0 else 'Down'})\n   └ **Term Premia:** {tp_trend}"
-    
-    except Exception as e: return f"⚠️ BTC Macro Error: {e}"
+def get_top_futures():
+    return [
+        'ES=F', 'NQ=F', 'YM=F', 'RTY=F', 'NKD=F', 'FTSE=F', # Indices
+        'CL=F', 'NG=F', 'RB=F', 'HO=F', 'BZ=F', # Energy
+        'GC=F', 'SI=F', 'HG=F', 'PL=F', 'PA=F', # Metals
+        'ZT=F', 'ZF=F', 'ZN=F', 'ZB=F', # Rates
+        '6E=F', '6B=F', '6J=F', '6A=F', 'DX-Y.NYB', # Currencies
+        'ZC=F', 'ZS=F', 'ZW=F', 'ZL=F', 'ZM=F', # Grains
+        'CC=F', 'KC=F', 'SB=F', 'CT=F', 'LE=F', 'HE=F' # Softs/Meat
+    ]
 
 # ==========================================================
-#  ENGINE 2: MICHAEL HOWELL (Dynamic Cycle)
+#  ENGINE 1: MICHAEL HOWELL (Capital Wars)
 # ==========================================================
 def get_michael_howell_update():
     """
-    Dynamic Liquidity Cycle (No Hardcoding).
-    Based on Rate of Change (RoC) of Global Liquidity Proxy.
+    Fixed Logic: Ensures no blank output.
+    Tracks: Net Liquidity Cycle, Treasury QE, and Term Premia.
     """
     try:
-        start = datetime.datetime.now() - datetime.timedelta(days=500)
+        start = datetime.datetime.now() - datetime.timedelta(days=730)
         fred = web.DataReader(['WALCL', 'WTREGEN', 'RRPONTSYD'], 'fred', start, datetime.datetime.now())
         fred = fred.resample('D').ffill().dropna()
         
         net_liq = (fred['WALCL'] / 1000) - fred['WTREGEN'] - fred['RRPONTSYD']
         
-        # Momentum (63-day RoC)
+        # Momentum (63-day) & Acceleration (20-day delta of momentum)
         roc_med = net_liq.pct_change(63).iloc[-1]
+        roc_series = net_liq.pct_change(63)
+        acceleration = roc_series.diff(20).iloc[-1]
         
-        # Acceleration (Is the RoC increasing or decreasing?)
-        roc_prev = net_liq.pct_change(63).iloc[-20]
-        acceleration = roc_med - roc_prev
-        
-        # Dynamic Phase Determination
-        phase = ""
-        action = ""
-        
-        if roc_med > 0 and acceleration > 0:
-            phase = "REBOUND (Accelerating)"
+        # Treasury QE (Net Liq Up vs Fed Assets Down)
+        fed_assets_trend = (fred['WALCL'] / 1000).pct_change(63).iloc[-1]
+        treasury_qe = (roc_med > -0.01 and fed_assets_trend < 0)
+
+        # Cycle Logic (Exhaustive)
+        if roc_med > 0 and acceleration >= 0:
+            phase = "REBOUND (Early Cycle)"
             action = "Overweight: Tech / Crypto / High Beta"
         elif roc_med > 0 and acceleration < 0:
-            phase = "SPECULATION (Peaking / Slowing)"
-            action = "Overweight: Commodities / Energy / 5Y Bonds"
-        elif roc_med < 0 and acceleration < 0:
+            phase = "SPECULATION (Late Cycle / Peaking)"
+            action = "Overweight: Energy / Commodities\n   👉 Buy: 5Y Treasuries (Falling Term Premia)"
+        elif roc_med <= 0 and acceleration < 0:
             phase = "TURBULENCE (Contraction)"
-            action = "Overweight: Cash / Gold / Volatility"
-        elif roc_med < 0 and acceleration > 0:
+            action = "Overweight: Cash / Gold / Volatility\n   ⚠️ Avoid: Credit & High Beta"
+        elif roc_med <= 0 and acceleration >= 0:
             phase = "CALM (Bottoming)"
-            action = "Accumulate: Credit / Quality Equities"
-            
-        return f"🏛️ **CAPITAL WARS (Michael Howell)**\n   └ **Phase:** {phase}\n   └ **Trend:** {'Expanding' if roc_med > 0 else 'Contracting'} ({roc_med*100:.2f}%)\n   └ **Action:** {action}"
-    except: return "⚠️ Howell Engine Error"
+            action = "Accumulate: Corporate Credit / Quality Stocks"
+        else:
+            phase = "NEUTRAL (Transition)"
+            action = "Hold Quality / Hedged"
+
+        tp_signal = "Falling (Bullish Bonds) 📉" if roc_med < 0 else "Rising (Bearish Bonds) 📈"
+
+        msg = f"🏛️ **CAPITAL WARS (Michael Howell)**\n"
+        msg += f"   └ **Phase:** {phase}\n"
+        msg += f"   └ **Trend:** {'Expanding' if roc_med > 0 else 'Contracting'} ({roc_med*100:.2f}%)\n"
+        msg += f"   └ **Term Premia:** {tp_signal}\n"
+        msg += f"   └ **Action:** {action}\n"
+        
+        if treasury_qe:
+            msg += "   └ 🚨 **Signal:** 'Treasury QE' Active (Baton Pass)"
+        
+        return msg
+    except Exception as e: return f"⚠️ Howell Engine Error: {e}"
 
 # ==========================================================
-#  ENGINE 3: THE BITCOIN LAYER (Liquidity Velocity)
+#  ENGINE 2: BTC MACRO SENSITIVITY
+# ==========================================================
+def get_btc_macro_sensitivity():
+    try:
+        start = datetime.datetime.now() - datetime.timedelta(days=400)
+        fred = web.DataReader(['T5YIE', 'DGS10', 'DGS2'], 'fred', start, datetime.datetime.now())
+        fred = fred.resample('D').ffill().dropna()
+        
+        inflation_exp = fred['T5YIE'].iloc[-1]
+        inflation_trend = fred['T5YIE'].pct_change(20).iloc[-1]
+        
+        # Term Premia Proxy (Steepener vs Flattener)
+        tp_proxy = fred['DGS10'] - fred['DGS2']
+        tp_current = tp_proxy.iloc[-1]
+        tp_prev = tp_proxy.iloc[-20]
+        tp_trend = "RISING (Bearish)" if tp_current > tp_prev else "FALLING (Bullish)"
+        
+        btc_signal = "⚪ NEUTRAL"
+        if inflation_trend > 0 and tp_current < tp_prev:
+            btc_signal = "🟢 BULLISH (Ideal: Inflation Up / TP Down)"
+        elif inflation_trend < 0:
+            btc_signal = "🔴 BEARISH (Disinflation)"
+            
+        return f"🪙 **BITCOIN MACRO SENSITIVITY**\n   └ **Signal:** {btc_signal}\n   └ **Inflation Swaps:** {inflation_exp:.2f}% ({'Up' if inflation_trend > 0 else 'Down'})\n   └ **Term Premia:** {tp_trend}"
+    except Exception as e: return f"⚠️ BTC Macro Error: {e}"
+
+# ==========================================================
+#  ENGINE 3: THE BITCOIN LAYER
 # ==========================================================
 def get_bitcoin_layer_update():
-    """
-    Focus: Velocity (Acceleration) of Liquidity.
-    BTC follows the 2nd Derivative.
-    """
     try:
         start = datetime.datetime.now() - datetime.timedelta(days=400)
         fred = web.DataReader(['WALCL', 'WTREGEN', 'RRPONTSYD'], 'fred', start, datetime.datetime.now())
         fred = fred.resample('D').ffill().dropna()
         net_liq = (fred['WALCL'] / 1000) - fred['WTREGEN'] - fred['RRPONTSYD']
         
-        # Velocity Calculation (2nd Derivative)
         velocity = net_liq.diff().diff().rolling(window=10).mean().iloc[-1]
+        signal = "🟢 HIGH VELOCITY (Impulse Up)" if velocity > 0 else "🟡 LOW VELOCITY (Stalling)"
         
-        signal = ""
-        if velocity > 0:
-            signal = "🟢 HIGH VELOCITY (Impulse Up)"
-        else:
-            signal = "🟡 LOW VELOCITY (Stalling/Drag)"
-            
         return f"🟠 **THE BITCOIN LAYER**\n   └ **Velocity:** {signal}\n   └ **Metric:** 2nd Derivative of Net Liq"
     except: return "⚠️ Bitcoin Layer Error"
 
 # ==========================================================
-#  ENGINE 4: REAL VISION (The Everything Code)
+#  ENGINE 4: REAL VISION (Everything Code)
 # ==========================================================
 def get_real_vision_update():
     try:
@@ -221,21 +221,17 @@ def get_real_vision_update():
         liq_momo = net_liq.pct_change(63).iloc[-1]
         growth_momo = spy.pct_change(63).iloc[-1]
         
-        regime = ""
-        if liq_momo > 0 and growth_momo <= 0:
-            regime = "🍌 **BANANA ZONE** (Liq UP / Growth DOWN)"
-        elif liq_momo > 0 and growth_momo > 0:
-            regime = "🟢 **SPRING/SUMMER** (Risk On)"
-        elif liq_momo < 0 and growth_momo < 0:
-            regime = "🍂 **FALL** (Slowdown)"
-        else:
-            regime = "❄️ **WINTER** (Risk Off)"
+        regime = "NEUTRAL"
+        if liq_momo > 0 and growth_momo <= 0: regime = "🍌 **BANANA ZONE** (Accumulate)"
+        elif liq_momo > 0 and growth_momo > 0: regime = "🟢 **SPRING** (Risk On)"
+        elif liq_momo < 0 and growth_momo < 0: regime = "🍂 **FALL** (Slowdown)"
+        else: regime = "❄️ **WINTER** (Risk Off)"
             
         return f"🧠 **REAL VISION**\n   └ **Regime:** {regime}"
     except: return "⚠️ Real Vision Error"
 
 # ==========================================================
-#  ENGINE 5: DEMARK STOCK SCANNER
+#  ENGINE 5: MULTI-TIMEFRAME DEMARK
 # ==========================================================
 def calculate_demark(df):
     df['Close_4'] = df['Close'].shift(4)
@@ -297,55 +293,46 @@ def analyze_ticker(ticker):
 
         df['SMA_200'] = df['Close'].rolling(window=200).mean()
         df = calculate_demark(df)
-        last = df.iloc[-1]
-        price = last['Close']
-        sma = last['SMA_200']
         
-        signal = None
+        df_weekly = df.resample('W-FRI').agg({
+            'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+        }).dropna()
+        df_weekly = calculate_demark(df_weekly)
         
-        if last['Buy_Countdown'] == 13:
-            signal = {
-                'ticker': ticker, 'type': 'BUY', 'algo': 'COUNTDOWN 13',
-                'price': price, 'perfected': last['Buy_13_Perfected'],
-                'action': 'ACCUMULATE', 'timing': 'Weeks',
-                'stop': min(df['Low'].iloc[-13:]), 'target': price * 1.15,
-                'trend': 'Bullish' if price > sma else 'Bearish'
-            }
-        elif last['Sell_Countdown'] == 13:
-            signal = {
-                'ticker': ticker, 'type': 'SELL', 'algo': 'COUNTDOWN 13',
-                'price': price, 'perfected': last['Sell_13_Perfected'],
-                'action': 'DISTRIBUTE', 'timing': 'Weeks',
-                'stop': max(df['High'].iloc[-13:]), 'target': price * 0.85,
-                'trend': 'Bullish' if price > sma else 'Bearish'
-            }
-        elif last['Buy_Setup'] == 9:
-            stop = min(df['Low'].iloc[-9:])
-            risk = max(price - stop, price * 0.01)
-            l9, l8, l7, l6 = df['Low'].iloc[-1], df['Low'].iloc[-2], df['Low'].iloc[-3], df['Low'].iloc[-4]
-            perf = (l9 < l7 and l9 < l6) or (l8 < l7 and l8 < l6)
-            
-            signal = {
-                'ticker': ticker, 'type': 'BUY', 'algo': 'SETUP 9',
-                'price': price, 'perfected': perf,
-                'action': 'BOUNCE', 'timing': '1-4 Days',
-                'stop': stop, 'target': price + (risk * 2),
-                'trend': 'Bullish' if price > sma else 'Bearish'
-            }
-        elif last['Sell_Setup'] == 9:
-            stop = max(df['High'].iloc[-9:])
-            risk = max(stop - price, price * 0.01)
-            h9, h8, h7, h6 = df['High'].iloc[-1], df['High'].iloc[-2], df['High'].iloc[-3], df['High'].iloc[-4]
-            perf = (h9 > h7 and h9 > h6) or (h8 > h7 and h8 > h6)
-            
-            signal = {
-                'ticker': ticker, 'type': 'SELL', 'algo': 'SETUP 9',
-                'price': price, 'perfected': perf,
-                'action': 'PULLBACK', 'timing': '1-4 Days',
-                'stop': stop, 'target': price - (risk * 2),
-                'trend': 'Bullish' if price > sma else 'Bearish'
-            }
-        return signal
+        last_d = df.iloc[-1]
+        last_w = df_weekly.iloc[-1]
+        price = last_d['Close']
+        
+        daily_sig = None; weekly_sig = None
+        
+        # Daily
+        if last_d['Buy_Countdown'] == 13: daily_sig = "BUY 13"
+        elif last_d['Sell_Countdown'] == 13: daily_sig = "SELL 13"
+        elif last_d['Buy_Setup'] == 9: daily_sig = "BUY 9"
+        elif last_d['Sell_Setup'] == 9: daily_sig = "SELL 9"
+        
+        # Weekly
+        if last_w['Buy_Countdown'] == 13: weekly_sig = "BUY 13"
+        elif last_w['Sell_Countdown'] == 13: weekly_sig = "SELL 13"
+        elif last_w['Buy_Setup'] == 9: weekly_sig = "BUY 9"
+        elif last_w['Sell_Setup'] == 9: weekly_sig = "SELL 9"
+        
+        if not daily_sig and not weekly_sig: return None
+        
+        # Perfection Check
+        d_perf = last_d.get('Buy_13_Perfected') or last_d.get('Sell_13_Perfected') or False
+        if daily_sig and '9' in daily_sig:
+            if 'BUY' in daily_sig:
+                l9, l8, l7, l6 = df['Low'].iloc[-1], df['Low'].iloc[-2], df['Low'].iloc[-3], df['Low'].iloc[-4]
+                d_perf = (l9 < l7 and l9 < l6) or (l8 < l7 and l8 < l6)
+            else:
+                h9, h8, h7, h6 = df['High'].iloc[-1], df['High'].iloc[-2], df['High'].iloc[-3], df['High'].iloc[-4]
+                d_perf = (h9 > h7 and h9 > h6) or (h8 > h7 and h8 > h6)
+
+        return {
+            'ticker': ticker, 'price': price,
+            'daily': daily_sig, 'weekly': weekly_sig, 'perfected': d_perf
+        }
     except: return None
 
 # ==========================================================
@@ -353,8 +340,8 @@ def analyze_ticker(ticker):
 # ==========================================================
 if __name__ == "__main__":
     print("1. Generating Macro Report...")
-    btc_macro = get_btc_macro_sensitivity()
     howell = get_michael_howell_update()
+    btc_macro = get_btc_macro_sensitivity()
     bitcoin = get_bitcoin_layer_update()
     rv = get_real_vision_update()
     
@@ -363,34 +350,53 @@ if __name__ == "__main__":
     
     print("2. Fetching Ticker Universe...")
     top_crypto = get_top_200_cryptos()
+    top_futures = get_top_futures()
     sp500 = get_sp500_tickers()
     nasdaq = get_nasdaq_tickers()
     
-    full_universe = list(set(STRATEGIC_TICKERS + top_crypto + sp500 + nasdaq))
+    # FIXED: Added top_futures to the list
+    full_universe = list(set(STRATEGIC_TICKERS + top_crypto + top_futures + sp500 + nasdaq))
     print(f"Scanning {len(full_universe)} tickers...")
     
-    signals = []
+    dual_signals = []
+    weekly_signals = []
+    daily_signals = []
+    
     for i, ticker in enumerate(full_universe):
         if i % 100 == 0: print(f"Processing {i}/{len(full_universe)}...")
         res = analyze_ticker(ticker)
-        if res: signals.append(res)
+        if res:
+            if res['daily'] and res['weekly']: dual_signals.append(res)
+            elif res['weekly']: weekly_signals.append(res)
+            elif res['daily']: daily_signals.append(res)
         time.sleep(0.01)
         
-    if signals:
-        signals.sort(key=lambda x: (x['algo'] == 'SETUP 9', x['type']))
-        
-        stock_msg = "🔔 **DEMARK SIGNALS (INSTITUTIONAL)** 🔔\n"
-        for s in signals:
-            icon = "🟢" if "BUY" in s['type'] else "🔴"
-            perf = "⭐" if s['perfected'] else "⚠️"
-            stock_msg += f"{icon} **{s['ticker']}** [{s['algo']}] {perf}\n"
-            stock_msg += f"   ⚡ {s['action']} ({s['trend']})\n"
-            stock_msg += f"   🎯 ${s['target']:.2f} | 🛑 ${s['stop']:.2f}\n"
-            stock_msg += f"   ⏳ {s['timing']}\n"
-            stock_msg += "───────────────\n"
-            
-        send_telegram_alert(stock_msg)
+    if not dual_signals and not weekly_signals and not daily_signals:
+        print("No signals.")
     else:
-        print("No stock signals found.")
+        msg = "🔔 **DEMARK DUAL-TIMEFRAME ALERTS** 🔔\n"
+        
+        if dual_signals:
+            msg += "\n🚨 **INSTITUTIONAL CONVICTION (Daily + Weekly)** 🚨\n"
+            for s in dual_signals:
+                icon = "🟢" if "BUY" in s['daily'] else "🔴"
+                msg += f"{icon} **{s['ticker']}**: ${s['price']:.2f}\n   └ 📅 W: {s['weekly']} | ⚡ D: {s['daily']} ({'⭐' if s['perfected'] else ''})\n"
+
+        if weekly_signals:
+            msg += "\n📅 **WEEKLY SIGNALS (Major Trend)**\n"
+            for s in weekly_signals:
+                icon = "🟢" if "BUY" in s['weekly'] else "🔴"
+                msg += f"{icon} **{s['ticker']}**: {s['weekly']} @ ${s['price']:.2f}\n"
+
+        if daily_signals:
+            msg += "\n⚡ **DAILY SIGNALS (Tactical)**\n"
+            # Sort: 13s first
+            daily_signals.sort(key=lambda x: '13' in str(x['daily']), reverse=True)
+            for s in daily_signals:
+                icon = "🟢" if "BUY" in s['daily'] else "🔴"
+                perf = "⭐" if s['perfected'] else ""
+                msg += f"{icon} **{s['ticker']}**: {s['daily']} {perf}\n"
+
+        send_telegram_alert(msg)
     
     print("Done.")

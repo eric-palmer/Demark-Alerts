@@ -2,7 +2,7 @@ name: Run Scanner
 
 on:
   schedule:
-    - cron: '0 21 * * 1-5' # Runs Mon-Fri at 4pm EST
+    - cron: '0 21 * * 1-5' # Runs Mon-Fri at 4pm CST (21:00 UTC)
   workflow_dispatch:      # Allows manual run button
 
 jobs:
@@ -20,7 +20,7 @@ jobs:
 
       - name: Install libraries
         run: |
-          pip install yfinance pandas requests lxml pandas-datareader
+          pip install yfinance pandas requests lxml pandas-datareader scipy numpy
 
       - name: Run Scanner
         env:

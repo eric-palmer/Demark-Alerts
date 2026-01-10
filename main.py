@@ -1,6 +1,5 @@
 import yfinance as yf
 import pandas as pd
-import pandas_datareader.data as web 
 import requests
 import os
 import sys
@@ -8,6 +7,7 @@ import time
 import io
 import datetime
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- CONFIGURATION (INSTITUTIONAL WATCHLIST) ---
 CURRENT_PORTFOLIO = ['SLV', 'DJT']
@@ -142,19 +142,53 @@ def safe_download(ticker, retries=5):
 def get_top_futures():
     return ['ES=F', 'NQ=F', 'YM=F', 'RTY=F', 'NKD=F', 'FTSE=F', 'CL=F', 'NG=F', 'RB=F', 'HO=F', 'BZ=F', 'GC=F', 'SI=F', 'HG=F', 'PL=F', 'PA=F', 'ZT=F', 'ZF=F', 'ZN=F', 'ZB=F', '6E=F', '6B=F', '6J=F', '6A=F', 'DX-Y.NYB', 'ZC=F', 'ZS=F', 'ZW=F', 'ZL=F', 'ZM=F', 'CC=F', 'KC=F', 'SB=F', 'CT=F', 'LE=F', 'HE=F']
 
+def fetch_fred_series(series_id, start_date, session, retries=5):
+    base_url = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+    params = {
+        'id': series_id,
+        'cosd': start_date.strftime('%Y-%m-%d'),
+        'coed': datetime.datetime.now().strftime('%Y-%m-%d')
+    }
+    for attempt in range(retries):
+        try:
+            response = session.get(base_url, params=params, timeout=10)
+            response.raise_for_status()
+            df = pd.read_csv(io.StringIO(response.text), parse_dates=['DATE'], index_col='DATE')
+            df = df[series_id].to_frame(name=series_id)
+            df = df.replace('.', np.nan).astype(float)
+            return df
+        except Exception as e:
+            print(f"Error fetching {series_id}: {e}")
+            time.sleep(2)
+    return pd.DataFrame()
+
 def get_shared_macro_data():
     try:
-        start = datetime.datetime.now() - datetime.timedelta(days=730)
-        fred = web.DataReader(['WALCL', 'WTREGEN', 'RRPONTSYD', 'DGS10', 'DGS2', 'T5YIE'], 'fred', start, datetime.datetime.now())
+        start_date = datetime.datetime.now() - datetime.timedelta(days=730)
+        series_list = ['WALCL', 'WTREGEN', 'RRPONTSYD', 'DGS10', 'DGS2', 'T5YIE']
+        session = get_session()
+        
+        fred_dfs = []
+        for series in series_list:
+            df = fetch_fred_series(series, start_date, session)
+            if not df.empty:
+                fred_dfs.append(df)
+        
+        if not fred_dfs:
+            raise ValueError("All FRED series failed to fetch")
+        
+        fred = pd.concat(fred_dfs, axis=1)
         fred = fred.resample('D').ffill().dropna()
         
         net_liq = (fred['WALCL'] / 1000) - fred['WTREGEN'] - fred['RRPONTSYD']
         term_premia = fred['DGS10'] - fred['DGS2']
         spy = safe_download('SPY')
-        if spy is None: return None
+        if spy is None: raise ValueError("SPY data unavailable")
         
         return {'net_liq': net_liq, 'term_premia': term_premia, 'inflation': fred['T5YIE'], 'fed_assets': fred['WALCL'] / 1000, 'spy': spy['Close']}
-    except: return None
+    except Exception as e:
+        print(f"Macro fetch error: {e}")
+        return None
 
 # --- INDICATOR LIBRARY ---
 def calc_rsi(series, period=14):
@@ -311,7 +345,9 @@ def analyze_ticker(ticker, is_portfolio=False):
         df = safe_download(ticker)
         
         # Filter Ghost Data
-        if df is None: return None
+        if df is None: 
+            print(f"Data download failed for {ticker}")
+            return None
         if not is_portfolio and (df['Volume'].iloc[-5:].sum() == 0 or df['Close'].iloc[-1] < 0.00000001): return None
         
         df_weekly = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
@@ -401,7 +437,9 @@ def analyze_ticker(ticker, is_portfolio=False):
             'rsi_val': last_d['RSI'],
             'count': f"Buy {last_d['Buy_Setup']}" if last_d['Buy_Setup'] > 0 else f"Sell {last_d['Sell_Setup']}"
         }
-    except: return None
+    except Exception as e:
+        print(f"Analysis error for {ticker}: {e}")
+        return None
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
@@ -445,35 +483,38 @@ if __name__ == "__main__":
     power = []; perfected = []; unperf = []; sq_list = []; fib_list = []; shannon_list = []
     macd_list = []; sto_list = []; adx_list = []
     
-    for t in universe:
-        res = analyze_ticker(t)
-        if not res: continue
-        
-        d = res['demark']
-        score = 0
-        if d and d.get('perfected'): score += 2  # Higher weight for perfected DeMark
-        if res['rsi']: score += 1
-        if res['squeeze']: score += 1
-        if res['fib']: score += 1
-        if res['shannon']['breakout']: score += 1
-        if res['macd']: score += 1
-        if res['stochastic']: score += 1
-        if res['adx']: score += 1
-        
-        if score >= 3: power.append(res)  # Raised threshold for more conviction
-        
-        if d:
-            if d.get('perfected'): perfected.append(res)
-            else: unperf.append(res)
-        if res['squeeze']: sq_list.append(res)
-        if res['fib']: fib_list.append(res)
-        if res['shannon']['breakout']: shannon_list.append(res)
-        if res['macd']: macd_list.append(res)
-        if res['stochastic']: sto_list.append(res)
-        if res['adx']: adx_list.append(res)
-        
-        time.sleep(0.1)
-        
+    def process_ticker(t):
+        return analyze_ticker(t)
+    
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_ticker = {executor.submit(process_ticker, t): t for t in universe}
+        for future in as_completed(future_to_ticker):
+            res = future.result()
+            if not res: continue
+            
+            d = res['demark']
+            score = 0
+            if d and d.get('perfected'): score += 2  # Higher weight for perfected DeMark
+            if res['rsi']: score += 1
+            if res['squeeze']: score += 1
+            if res['fib']: score += 1
+            if res['shannon']['breakout']: score += 1
+            if res['macd']: score += 1
+            if res['stochastic']: score += 1
+            if res['adx']: score += 1
+            
+            if score >= 3: power.append(res)  # Raised threshold for more conviction
+            
+            if d:
+                if d.get('perfected'): perfected.append(res)
+                else: unperf.append(res)
+            if res['squeeze']: sq_list.append(res)
+            if res['fib']: fib_list.append(res)
+            if res['shannon']['breakout']: shannon_list.append(res)
+            if res['macd']: macd_list.append(res)
+            if res['stochastic']: sto_list.append(res)
+            if res['adx']: adx_list.append(res)
+    
     # --- ALERTS ---
     a_msg = "🔔 **MARKET ALERTS** 🔔\n\n"
     

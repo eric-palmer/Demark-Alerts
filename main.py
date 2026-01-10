@@ -142,19 +142,25 @@ def safe_download(ticker, retries=5):
 def get_top_futures():
     return ['ES=F', 'NQ=F', 'YM=F', 'RTY=F', 'NKD=F', 'FTSE=F', 'CL=F', 'NG=F', 'RB=F', 'HO=F', 'BZ=F', 'GC=F', 'SI=F', 'HG=F', 'PL=F', 'PA=F', 'ZT=F', 'ZF=F', 'ZN=F', 'ZB=F', '6E=F', '6B=F', '6J=F', '6A=F', 'DX-Y.NYB', 'ZC=F', 'ZS=F', 'ZW=F', 'ZL=F', 'ZM=F', 'CC=F', 'KC=F', 'SB=F', 'CT=F', 'LE=F', 'HE=F']
 
-def fetch_fred_series(series_id, start_date, session, retries=5):
-    base_url = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+def fetch_fred_series(series_id, start_date, api_key, session, retries=5):
+    base_url = "https://api.stlouisfed.org/fred/series/observations"
     params = {
-        'id': series_id,
-        'cosd': start_date.strftime('%Y-%m-%d'),
-        'coed': datetime.datetime.now().strftime('%Y-%m-%d')
+        'series_id': series_id,
+        'api_key': api_key,
+        'file_type': 'json',
+        'observation_start': start_date.strftime('%Y-%m-%d'),
+        'observation_end': datetime.datetime.now().strftime('%Y-%m-%d')
     }
     for attempt in range(retries):
         try:
-            response = session.get(base_url, params=params, timeout=10)
-            response.raise_for_status()
-            df = pd.read_csv(io.StringIO(response.text), parse_dates=['DATE'], index_col='DATE')
-            df = df[series_id].to_frame(name=series_id)
+            resp = session.get(base_url, params=params, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            observations = data['observations']
+            df = pd.DataFrame(observations)
+            df['date'] = pd.to_datetime(df['date'])
+            df.set_index('date', inplace=True)
+            df = df['value'].to_frame(name=series_id)
             df = df.replace('.', np.nan).astype(float)
             return df
         except Exception as e:
@@ -166,11 +172,12 @@ def get_shared_macro_data():
     try:
         start_date = datetime.datetime.now() - datetime.timedelta(days=730)
         series_list = ['WALCL', 'WTREGEN', 'RRPONTSYD', 'DGS10', 'DGS2', 'T5YIE']
+        api_key = os.environ.get('FRED_API_KEY', 'abcdefghijklmnopqrstuvwxyz123456')  # Default test key; set your own for production
         session = get_session()
         
         fred_dfs = []
         for series in series_list:
-            df = fetch_fred_series(series, start_date, session)
+            df = fetch_fred_series(series, start_date, api_key, session)
             if not df.empty:
                 fred_dfs.append(df)
         
@@ -254,7 +261,7 @@ def calc_demark(df):
             df.iloc[i, df.columns.get_loc('Sell_Setup')] = sell_seq
             
             if buy_seq == 9: active_buy = True; buy_cd = 0; active_sell = False
-            if sell_seq == 9: active_sell = True; sell_cd = 0; active_buy = False
+            if sell_seq = 9: active_sell = True; sell_cd = 0; active_buy = False
             
             if active_buy and closes[i] <= lows[i-2]:
                 buy_cd += 1; df.iloc[i, df.columns.get_loc('Buy_Countdown')] = buy_cd
@@ -576,3 +583,4 @@ if __name__ == "__main__":
 
     send_telegram_alert(a_msg)
     print("Done.")
+```', '

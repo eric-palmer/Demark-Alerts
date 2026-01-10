@@ -57,7 +57,6 @@ def send_telegram_alert(message):
     chat_id = os.environ.get('TELEGRAM_CHAT_ID')
     if not token or not chat_id: return
     
-    # Chunk long messages
     max_len = 4000
     for i in range(0, len(message), max_len):
         chunk = message[i:i+max_len]
@@ -73,25 +72,36 @@ def format_price(price):
     if price < 1.00: return f"${price:.4f}"
     return f"${price:.2f}"
 
-# --- DATA FETCHERS (CRASH PROOF) ---
-def safe_download(ticker):
-    try:
-        # User-Agent to prevent 403 Forbidden
-        session = requests.Session()
-        session.headers.update({'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'})
-        
-        df = yf.download(ticker, period="2y", progress=False, auto_adjust=True, session=session)
-        
-        # Validation: Must have data rows and volume
-        if df.empty or len(df) < 50: return None
-        if 'Close' not in df.columns: return None
-        
-        # Handle MultiIndex
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+# --- ROBUST DATA ENGINE (RETRY LOGIC) ---
+def get_session():
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Encoding': 'gzip, deflate, br'
+    })
+    return session
+
+def safe_download(ticker, retries=3):
+    """Downloads data with retry logic to handle temporary blocks"""
+    for i in range(retries):
+        try:
+            session = get_session()
+            df = yf.download(ticker, period="2y", progress=False, auto_adjust=True, session=session)
             
-        return df
-    except: return None
+            # Validation
+            if df.empty or len(df) < 50: 
+                time.sleep(1)
+                continue
+                
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+                
+            return df
+        except:
+            time.sleep(2) # Wait before retry
+            
+    return None
 
 def get_top_futures():
     return ['ES=F', 'NQ=F', 'YM=F', 'RTY=F', 'NKD=F', 'FTSE=F', 'CL=F', 'NG=F', 'RB=F', 'HO=F', 'BZ=F', 'GC=F', 'SI=F', 'HG=F', 'PL=F', 'PA=F', 'ZT=F', 'ZF=F', 'ZN=F', 'ZB=F', '6E=F', '6B=F', '6J=F', '6A=F', 'DX-Y.NYB', 'ZC=F', 'ZS=F', 'ZW=F', 'ZL=F', 'ZM=F', 'CC=F', 'KC=F', 'SB=F', 'CT=F', 'LE=F', 'HE=F']
@@ -99,6 +109,7 @@ def get_top_futures():
 def get_shared_macro_data():
     try:
         start = datetime.datetime.now() - datetime.timedelta(days=730)
+        # Use simple reader first
         fred = web.DataReader(['WALCL', 'WTREGEN', 'RRPONTSYD', 'DGS10', 'DGS2', 'T5YIE'], 'fred', start, datetime.datetime.now())
         fred = fred.resample('D').ffill().dropna()
         
@@ -110,7 +121,7 @@ def get_shared_macro_data():
         return {'net_liq': net_liq, 'term_premia': term_premia, 'inflation': fred['T5YIE'], 'fed_assets': fred['WALCL'] / 1000, 'spy': spy['Close']}
     except: return None
 
-# --- INDICATORS (CRASH PROOF WRAPPERS) ---
+# --- INDICATORS ---
 def calc_rsi(series, period=14):
     try:
         delta = series.diff()
@@ -189,7 +200,6 @@ def calc_demark(df):
 
 def analyze_ticker(ticker, is_portfolio=False):
     try:
-        # DATA FIX: 3 Years history for accurate 200 SMA
         df = safe_download(ticker)
         
         # QUALITY FILTER
@@ -197,45 +207,34 @@ def analyze_ticker(ticker, is_portfolio=False):
         if not is_portfolio and (df['Volume'].iloc[-5:].sum() == 0 or df['Close'].iloc[-1] < 0.00000001): return None
         
         df_weekly = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
-        if len(df_weekly) < 20: return None # Need minimal history
+        if len(df_weekly) < 20: return None
         
         # --- INDICATORS ---
         df['RSI'] = calc_rsi(df['Close'])
         df = calc_demark(df)
         df_weekly = calc_demark(df_weekly)
         
-        # MACD
+        # MACD & Trend
         exp1 = df['Close'].ewm(span=12, adjust=False).mean()
         exp2 = df['Close'].ewm(span=26, adjust=False).mean()
         macd = exp1 - exp2
         signal = macd.ewm(span=9, adjust=False).mean()
+        sma200 = df['Close'].rolling(200).mean().iloc[-1]
         
-        # ADX
-        plus_dm = df['High'].diff().clip(lower=0)
-        minus_dm = df['Low'].diff().clip(lower=0)
-        tr = df['High'] - df['Low']
-        atr = tr.rolling(14).mean()
-        plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / atr)
-        minus_di = 100 * (minus_dm.ewm(alpha=1/14).mean() / atr)
-        dx = 100 * abs((plus_di - minus_di) / (plus_di + minus_di))
-        df['ADX'] = dx.rolling(14).mean()
-
         d_sq = calc_squeeze(df); w_sq = calc_squeeze(df_weekly)
         fib = calc_fib(df)
         
-        # Last Values
         last_d = df.iloc[-1]; last_w = df_weekly.iloc[-1]
         price = last_d['Close']
         
-        # Portfolio Targets
-        atr_val = atr.iloc[-1] if not np.isnan(atr.iloc[-1]) else price * 0.02
-        p_target = price + (atr_val*2)
-        p_stop = price - (atr_val*1.5)
+        # Targets
+        tr = df['High'] - df['Low']
+        atr = tr.rolling(14).mean().iloc[-1]
+        p_target = price + (atr*2)
+        p_stop = price - (atr*1.5)
         
-        # --- SIGNALS ---
+        # Signals
         dm_sig = None; dm_perf = False
-        
-        # DeMark Logic
         if last_d['Buy_Countdown'] == 13: dm_sig = {'type': 'BUY 13', 'tf': 'Daily'}
         elif last_d['Sell_Countdown'] == 13: dm_sig = {'type': 'SELL 13', 'tf': 'Daily'}
         elif last_d['Buy_Setup'] == 9: dm_sig = {'type': 'BUY 9', 'tf': 'Daily'}
@@ -257,8 +256,8 @@ def analyze_ticker(ticker, is_portfolio=False):
         if d_sq: sq_sig = {'tf': 'Daily', 'bias': d_sq['bias'], 'move': d_sq['move']}
         elif w_sq: sq_sig = {'tf': 'Weekly', 'bias': w_sq['bias'], 'move': w_sq['move']}
         
-        # Verdict
-        trend = "BULLISH" if price > df['Close'].rolling(200).mean().iloc[-1] else "BEARISH"
+        # Detailed Portfolio Data
+        trend = "BULLISH" if price > sma200 else "BEARISH"
         macd_val = "Bullish" if macd.iloc[-1] > signal.iloc[-1] else "Bearish"
         
         verdict = "HOLD"
@@ -267,7 +266,7 @@ def analyze_ticker(ticker, is_portfolio=False):
         elif trend == "BULLISH" and macd_val == "Bullish": verdict = "BUY (Trend)"
         elif trend == "BEARISH" and macd_val == "Bearish": verdict = "SELL (Trend)"
         
-        # Check cross
+        # Cross logic
         tech_alert = None
         if (macd.iloc[-1] > signal.iloc[-1] and macd.iloc[-2] < signal.iloc[-2]): 
             tech_alert = {'type': 'BULLISH MACD CROSS', 'target': p_target, 'stop': p_stop, 'time': 'Trend Change'}
@@ -311,9 +310,10 @@ if __name__ == "__main__":
         res = analyze_ticker(t, is_portfolio=True)
         if res:
             p = format_price(res['price']); tgt = format_price(res['target']); stp = format_price(res['stop'])
-            p_msg += f"🔹 **{t}**: {res['verdict']} @ {p}\n   └ 🎯 Target: {tgt} | 🛑 Stop: {stp}\n   └ ⏳ Timing: 1-4 Weeks\n   └ 📊 Techs: {res['trend']} | RSI: {res['rsi_val']:.0f} | {res['count']}\n"
+            p_msg += f"🔹 **{t}**: {res['verdict']} @ {p}\n   └ 🎯 Target: {tgt} | 🛑 Stop: {stp}\n   └ ⏳ Timing: 1-4 Weeks (Swing)\n   └ 📊 Techs: {res['trend']} | RSI: {res['rsi_val']:.0f} | MACD: {res['macd']}\n   └ DeMark: {res['count']}\n"
             if res['demark']: p_msg += f"   🚨 SIGNAL: {res['demark']['type']} ({'Perf' if res['demark'].get('perfected') else 'Unperf'})\n"
             if res['squeeze']: p_msg += f"   ⚠️ SQUEEZE: {res['squeeze']['tf']} ({res['squeeze']['bias']})\n"
+            if res['fib']: p_msg += f"   🕸️ FIB: {res['fib']['action']} @ {res['fib']['level']}\n"
             p_msg += "\n"
     send_telegram_alert(p_msg)
     

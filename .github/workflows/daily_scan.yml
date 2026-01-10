@@ -2,7 +2,7 @@ name: Run Scanner
 
 on:
   schedule:
-    - cron: '0 21 * * *' # Runs daily at 4pm EST
+    - cron: '0 21 * * *'  # Runs daily at 4pm EST (9pm UTC)
   workflow_dispatch:
 
 jobs:
@@ -11,16 +11,16 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4  # Updated to latest version for better performance
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5  # Updated to latest setup action
         with:
-          python-version: '3.11' # <-- CRITICAL
+          python-version: '3.12'  # Bumped to latest stable (script is compatible)
 
       - name: Install libraries
         run: |
-          pip install yfinance pandas requests lxml pandas-datareader
+          pip install yfinance pandas requests numpy  # Removed lxml and pandas-datareader; added numpy
 
       - name: Run Scanner
         env:

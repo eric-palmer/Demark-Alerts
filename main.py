@@ -9,14 +9,13 @@ import datetime
 import numpy as np
 
 # --- CONFIGURATION (INSTITUTIONAL WATCHLIST) ---
-# Portfolio is analyzed first and guaranteed a report
 CURRENT_PORTFOLIO = ['SLV', 'DJT']
 
 STRATEGIC_TICKERS = [
-    # -- Meme / PolitiFi (Mixed Sources) --
-    'DJT', 'PENGU-USD', 'FARTCOIN-USD', 'DOGE-USD', 'SHIB-USD', 'PEPE-USD', 'TRUMP-USD',
+    # -- Meme / PolitiFi --
+    'DJT', 'PENGU-USD', 'FARTCOIN-USD', 'DOGE-USD', 'SHIB-USD', 'PEPE-USD',
     
-    # -- Crypto: Majors --
+    # -- Crypto: Coins --
     'BTC-USD', 'ETH-USD', 'SOL-USD',
     
     # -- Crypto: Miners & Infrastructure --
@@ -29,7 +28,7 @@ STRATEGIC_TICKERS = [
     'MSTR', 'COIN', 'HOOD', 'GLXY', 'STKE', 'DFDV', 'NODE', 'GEMI', 'BLSH',
     'CRCL',
     
-    # -- Commodities --
+    # -- Commodities (Futures & Proxies) --
     'GC=F', 'SI=F', 'CL=F', 'NG=F', 'HG=F', 'PL=F', 'PA=F',
     'GLD', 'SLV', 'PALL', 'PPLT', 'NIKL', 'LIT', 'ILIT', 'REMX',
     
@@ -54,7 +53,7 @@ STRATEGIC_TICKERS = [
     'MCHI', 'INDA', 'EWZ', 'EWJ', 'EWG', 'EWU', 'EWY', 'EWW', 'EWT', 'EWC', 'EEM',
     'AMX', 'PBR', 'VALE', 'NSRGY', 'DEO',
     
-    # -- Financials / Other --
+    # -- Financials / Bio / Other --
     'BLK', 'STT', 'ARES', 'SOFI', 'PYPL', 'IBKR', 'WU',
     'RXRX', 'SDGR', 'TEM', 'ABSI', 'DNA', 'TWST', 'GLW', 
     'KHC', 'LULU', 'YETI', 'DLR', 'EQIX', 'ORCL', 'LSF'
@@ -64,135 +63,58 @@ STRATEGIC_TICKERS = [
 def send_telegram_alert(message, header=""):
     token = os.environ.get('TELEGRAM_TOKEN')
     chat_id = os.environ.get('TELEGRAM_CHAT_ID')
-    if not token or not chat_id: 
-        print("⚠️ Telegram Token missing (Local run mode)")
-        return
-    
+    if not token or not chat_id: return
     full_msg = f"{header}\n\n{message}" if header else message
-    
-    # Chunking for Telegram's 4096 char limit
     if len(full_msg) > 4000:
         for i in range(0, len(full_msg), 4000):
-            chunk = full_msg[i:i+4000]
-            try:
-                requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
-                              json={"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"})
-                time.sleep(1)
-            except: pass
-    else:
-        try:
             requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
-                          json={"chat_id": chat_id, "text": full_msg, "parse_mode": "Markdown"})
-        except: pass
+                          json={"chat_id": chat_id, "text": full_msg[i:i+4000], "parse_mode": "Markdown"})
+    else:
+        requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
+                      json={"chat_id": chat_id, "text": full_msg, "parse_mode": "Markdown"})
 
 def format_price(price):
-    if price is None: return "N/A"
+    """Handles crypto dust prices like 0.000004"""
     if price < 0.0001: return f"${price:.8f}"
     if price < 1.00: return f"${price:.4f}"
-    return f"${price:,.2f}"
+    return f"${price:.2f}"
 
 # --- DATA FETCHERS ---
 def get_sp500_tickers():
     try:
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         r = requests.get(url, headers=headers)
         return [t.replace('.', '-') for t in pd.read_html(io.StringIO(r.text))[0]['Symbol'].tolist()]
-    except: 
-        print("⚠️ Wiki Scrape Failed, using fallback list.")
-        return ['SPY', 'QQQ', 'IWM', 'NVDA', 'AAPL', 'MSFT', 'AMZN', 'GOOG', 'META', 'TSLA']
+    except: return []
 
 def get_nasdaq_tickers():
     try:
         url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         r = requests.get(url, headers=headers)
         return pd.read_html(io.StringIO(r.text))[0]['Ticker'].tolist()
     except: return []
 
-def get_top_futures():
-    return ['ES=F', 'NQ=F', 'YM=F', 'RTY=F', 'NKD=F', 'FTSE=F', 'CL=F', 'NG=F', 'GC=F', 'SI=F', 'HG=F', 'PL=F', 'PA=F', 'DX-Y.NYB', 'ZC=F', 'ZS=F', 'ZW=F', 'CC=F', 'KC=F', 'SB=F']
-
-def get_top_200_cryptos_tickers():
-    """
-    Fetches top 200 crypto symbols from CoinGecko but formats them for Yahoo (SYMBOL-USD).
-    Used for the broad scan.
-    """
+def get_top_200_cryptos():
     try:
         url = "https://api.coingecko.com/api/v3/coins/markets"
-        params = {'vs_currency': 'usd', 'order': 'market_cap_desc', 'per_page': 200, 'page': 1}
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(url, params=params, headers=headers, timeout=10)
+        params = {'vs_currency': 'usd', 'order': 'market_cap_desc', 'per_page': 250, 'page': 1}
+        r = requests.get(url, params=params, timeout=10)
         data = r.json()
-        return [f"{c['symbol'].upper()}-USD" for c in data]
-    except: 
-        return ['BTC-USD', 'ETH-USD', 'SOL-USD', 'BNB-USD', 'XRP-USD', 'DOGE-USD', 'ADA-USD']
+        return [f"{c['symbol'].upper()}-USD" for c in data][:200]
+    except: return ['BTC-USD', 'ETH-USD', 'SOL-USD', 'BNB-USD', 'XRP-USD']
 
-# ==========================================================
-#  HYBRID DATA ENGINE (Yahoo + CoinGecko Fallback)
-# ==========================================================
-def fetch_coingecko_ohlc(ticker):
-    """
-    Fallback: If Yahoo fails, try to find the coin on CoinGecko 
-    and convert it to a Yahoo-style DataFrame.
-    """
-    try:
-        clean_symbol = ticker.replace('-USD', '').lower()
-        
-        # 1. Search for ID
-        search_url = "https://api.coingecko.com/api/v3/search"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        r_search = requests.get(search_url, params={'query': clean_symbol}, headers=headers)
-        search_data = r_search.json()
-        
-        if not search_data.get('coins'): return None
-        
-        # Take best match
-        coin_id = search_data['coins'][0]['id']
-        
-        # 2. Get OHLC (365 days)
-        ohlc_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-        r_ohlc = requests.get(ohlc_url, params={'vs_currency': 'usd', 'days': '365'}, headers=headers)
-        ohlc_data = r_ohlc.json()
-        
-        if not ohlc_data: return None
-        
-        # 3. Convert to DataFrame matching Yahoo format
-        df = pd.DataFrame(ohlc_data, columns=['Date', 'Open', 'High', 'Low', 'Close'])
-        df['Date'] = pd.to_datetime(df['Date'], unit='ms')
-        df.set_index('Date', inplace=True)
-        df['Volume'] = 1000000 # Dummy volume since OHLC endpoint doesn't give it, needed for logic check
-        return df
-    except Exception as e:
-        # print(f"CoinGecko Fail for {ticker}: {e}")
-        return None
-
-def get_data_hybrid(ticker, is_portfolio=False):
-    """
-    Tries Yahoo first. If empty/error, tries CoinGecko.
-    """
-    df = None
-    
-    # A. Try Yahoo Finance
-    try:
-        df = yf.download(ticker, period="2y", progress=False, auto_adjust=True)
-        # Check validity
-        if len(df) < 10 or df['Close'].isna().all():
-            df = None
-        elif isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-    except: pass
-    
-    # B. Try CoinGecko (Only for Crypto-like tickers if Yahoo failed)
-    if df is None and ("-USD" in ticker or ticker in STRATEGIC_TICKERS):
-        time.sleep(1.5) # Rate limit protection for CG Free API
-        df = fetch_coingecko_ohlc(ticker)
-        
-    # C. Quality Control
-    if df is None: return None
-    if not is_portfolio and len(df) < 50: return None
-    
-    return df
+def get_top_futures():
+    return [
+        'ES=F', 'NQ=F', 'YM=F', 'RTY=F', 'NKD=F', 'FTSE=F',
+        'CL=F', 'NG=F', 'RB=F', 'HO=F', 'BZ=F',
+        'GC=F', 'SI=F', 'HG=F', 'PL=F', 'PA=F',
+        'ZT=F', 'ZF=F', 'ZN=F', 'ZB=F',
+        '6E=F', '6B=F', '6J=F', '6A=F', 'DX-Y.NYB',
+        'ZC=F', 'ZS=F', 'ZW=F', 'ZL=F', 'ZM=F',
+        'CC=F', 'KC=F', 'SB=F', 'CT=F', 'LE=F', 'HE=F'
+    ]
 
 # ==========================================================
 #  SHARED MACRO DATA
@@ -210,7 +132,7 @@ def get_shared_macro_data():
         
         return {'net_liq': net_liq, 'term_premia': term_premia_proxy, 'inflation': fred['T5YIE'], 'fed_assets': fred['WALCL'] / 1000, 'spy': spy}
     except Exception as e:
-        print(f"Macro Data Error: {e}"); return None
+        print(f"Data Fetch Error: {e}"); return None
 
 # ==========================================================
 #  MACRO ENGINES
@@ -232,10 +154,7 @@ def get_michael_howell_update(data):
     if not data: return "⚠️ Data Error", "NEUTRAL"
     roc_med = data['net_liq'].pct_change(63).iloc[-1]
     acceleration = data['net_liq'].pct_change(63).diff(20).iloc[-1]
-    
-    tp_now = data['term_premia'].iloc[-1]
-    tp_prev = data['term_premia'].iloc[-20]
-    tp_trend = "RISING (Bearish)" if tp_now > tp_prev else "FALLING (Bullish)"
+    tp_trend = "RISING (Bearish)" if data['term_premia'].iloc[-1] > data['term_premia'].iloc[-20] else "FALLING (Bullish)"
     
     fed_trend = data['fed_assets'].pct_change(63).iloc[-1]
     treasury_qe = (roc_med > -0.01 and fed_trend < 0)
@@ -294,81 +213,75 @@ def get_onchain_update():
 #  ENGINE 6: TECHNICAL INDICATORS
 # ==========================================================
 def calculate_rsi(series, period=14):
-    try:
-        delta = series.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        if loss.iloc[-1] == 0: return 100
-        rs = gain / loss
-        return 100 - (100 / (1 + rs))
-    except: return 50
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
 def check_squeeze(df):
-    try:
-        sma = df['Close'].rolling(20).mean(); std = df['Close'].rolling(20).std()
-        upper_bb = sma + (std * 2); lower_bb = sma - (std * 2)
-        
-        tr = pd.DataFrame()
-        tr['h-l'] = df['High'] - df['Low']
-        tr['h-pc'] = abs(df['High'] - df['Close'].shift(1))
-        tr['l-pc'] = abs(df['Low'] - df['Close'].shift(1))
-        atr = tr.max(axis=1).rolling(20).mean()
-        upper_kc = sma + (atr * 1.5); lower_kc = sma - (atr * 1.5)
-        
-        if (lower_bb.iloc[-1] > lower_kc.iloc[-1]) and (upper_bb.iloc[-1] < upper_kc.iloc[-1]):
-            y = df['Close'].iloc[-20:].values; x = np.arange(len(y))
-            slope = np.polyfit(x, y, 1)[0]
-            return {'status': True, 'bias': "BULLISH 🟢" if slope > 0 else "BEARISH 🔴", 'move': atr.iloc[-1] * 2}
-    except: pass
+    sma = df['Close'].rolling(20).mean(); std = df['Close'].rolling(20).std()
+    upper_bb = sma + (std * 2); lower_bb = sma - (std * 2)
+    tr = pd.DataFrame()
+    tr['h-l'] = df['High'] - df['Low']
+    tr['h-pc'] = abs(df['High'] - df['Close'].shift(1))
+    tr['l-pc'] = abs(df['Low'] - df['Close'].shift(1))
+    atr = tr.max(axis=1).rolling(20).mean()
+    upper_kc = sma + (atr * 1.5); lower_kc = sma - (atr * 1.5)
+    
+    if (lower_bb.iloc[-1] > lower_kc.iloc[-1]) and (upper_bb.iloc[-1] < upper_kc.iloc[-1]):
+        y = df['Close'].iloc[-20:].values; x = np.arange(len(y))
+        slope = np.polyfit(x, y, 1)[0]
+        return {'status': True, 'bias': "BULLISH 🟢" if slope > 0 else "BEARISH 🔴", 'move': atr.iloc[-1] * 2}
     return {'status': False}
 
 def calculate_demark(df):
-    try:
-        df['Close_4'] = df['Close'].shift(4)
-        df['Buy_Setup'] = 0; df['Sell_Setup'] = 0; df['Buy_Countdown'] = 0; df['Sell_Countdown'] = 0
-        buy_seq = 0; sell_seq = 0; buy_cd = 0; sell_cd = 0; active_buy = False; active_sell = False
+    df['Close_4'] = df['Close'].shift(4)
+    df['Buy_Setup'] = 0; df['Sell_Setup'] = 0; df['Buy_Countdown'] = 0; df['Sell_Countdown'] = 0
+    buy_seq = 0; sell_seq = 0; buy_cd = 0; sell_cd = 0; active_buy = False; active_sell = False
+    
+    closes = df['Close'].values; closes_4 = df['Close_4'].values
+    lows = df['Low'].values; highs = df['High'].values
+    
+    for i in range(4, len(df)):
+        if closes[i] < closes_4[i]: buy_seq += 1; sell_seq = 0
+        elif closes[i] > closes_4[i]: sell_seq += 1; buy_seq = 0
+        else: buy_seq = 0; sell_seq = 0
+        df.iloc[i, df.columns.get_loc('Buy_Setup')] = buy_seq
+        df.iloc[i, df.columns.get_loc('Sell_Setup')] = sell_seq
         
-        closes = df['Close'].values; closes_4 = df['Close_4'].values
-        lows = df['Low'].values; highs = df['High'].values
-        
-        # Start at 4 to allow shift
-        for i in range(4, len(df)):
-            if closes[i] < closes_4[i]: buy_seq += 1; sell_seq = 0
-            elif closes[i] > closes_4[i]: sell_seq += 1; buy_seq = 0
-            else: buy_seq = 0; sell_seq = 0
-            
-            df.iloc[i, df.columns.get_loc('Buy_Setup')] = buy_seq
-            df.iloc[i, df.columns.get_loc('Sell_Setup')] = sell_seq
-            
-            # Activation (Perfected 9 not strictly required to start countdown, but useful for signal)
-            if buy_seq == 9: active_buy = True; buy_cd = 0; active_sell = False
-            if sell_seq == 9: active_sell = True; sell_cd = 0; active_buy = False
+        if buy_seq == 9: active_buy = True; buy_cd = 0; active_sell = False
+        if sell_seq == 9: active_sell = True; sell_cd = 0; active_buy = False
 
-            if active_buy:
-                # TD Buy Countdown: Close < Low 2 bars ago
-                if closes[i] <= lows[i-2]:
-                    buy_cd += 1; df.iloc[i, df.columns.get_loc('Buy_Countdown')] = buy_cd
-                    if buy_cd == 13: active_buy = False
-            
-            if active_sell:
-                # TD Sell Countdown: Close > High 2 bars ago
-                if closes[i] >= highs[i-2]:
-                    sell_cd += 1; df.iloc[i, df.columns.get_loc('Sell_Countdown')] = sell_cd
-                    if sell_cd == 13: active_sell = False
-    except: pass
+        if active_buy and closes[i] <= lows[i-2]:
+            buy_cd += 1; df.iloc[i, df.columns.get_loc('Buy_Countdown')] = buy_cd
+            if buy_cd == 13: active_buy = False
+        if active_sell and closes[i] >= highs[i-2]:
+            sell_cd += 1; df.iloc[i, df.columns.get_loc('Sell_Countdown')] = sell_cd
+            if sell_cd == 13: active_sell = False
     return df
 
 def analyze_ticker(ticker, is_portfolio=False):
     try:
-        # --- HYBRID DATA FETCH ---
-        df = get_data_hybrid(ticker, is_portfolio)
-        if df is None: return None
+        # DATA FIX: 3 Years history for accurate 200 SMA
+        df = yf.download(ticker, period="3y", progress=False, auto_adjust=True)
+        
+        # QUALITY FILTER: Skip "ghost" tickers with NO volume or weird prices
+        # BUT: Relax for "Portfolio" tickers so you always get a report
+        if not is_portfolio:
+            if len(df) < 100: return None
+            if df['Volume'].iloc[-5:].mean() == 0: return None # No volume = dead
+            if df['Close'].iloc[-1] < 0.00000001: return None # Dust
+        
+        if len(df) < 20: return None # Absolute minimum
+        
+        if isinstance(df.columns, pd.MultiIndex):
+            try: df.columns = df.columns.get_level_values(0)
+            except: pass
 
-        # Create Weekly Frame
         df_weekly = df.resample('W-FRI').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
-        if len(df_weekly) < 10: return None
-
-        # --- INDICATORS ---
+        
+        # INDICATORS
         # 1. MACD
         exp1 = df['Close'].ewm(span=12, adjust=False).mean()
         exp2 = df['Close'].ewm(span=26, adjust=False).mean()
@@ -385,66 +298,63 @@ def analyze_ticker(ticker, is_portfolio=False):
         dx = 100 * abs((plus_di - minus_di) / (plus_di + minus_di))
         df['ADX'] = dx.rolling(14).mean()
 
-        # Run Core Logic on Daily and Weekly
         for frame in [df, df_weekly]:
             frame['RSI'] = calculate_rsi(frame['Close'])
             frame = calculate_demark(frame)
         
+        # Check for Bad RSI (0/100/NaN) - Skip unless Portfolio
+        if not is_portfolio:
+            if pd.isna(df['RSI'].iloc[-1]) or df['RSI'].iloc[-1] <= 1 or df['RSI'].iloc[-1] >= 99: return None
+
         d_sq = check_squeeze(df); w_sq = check_squeeze(df_weekly)
         last_d = df.iloc[-1]; last_w = df_weekly.iloc[-1]
         price = last_d['Close']
         
-        # --- SIGNALS & VERDICT ---
-        dm_sig = None
+        # --- SIGNALS ---
+        dm_sig = None; dm_data = None
         
-        # Helper for Stops
-        d_lows = df['Low'].iloc[-15:].min()
-        d_highs = df['High'].iloc[-15:].max()
+        # Daily
+        if last_d['Buy_Countdown'] == 13: dm_data = {'type': 'BUY 13', 'target': price*1.15, 'stop': min(df['Low'].iloc[-13:]), 'time': 'Reversal (Weeks)', 'tf': 'Daily'}
+        elif last_d['Sell_Countdown'] == 13: dm_data = {'type': 'SELL 13', 'target': price*0.85, 'stop': max(df['High'].iloc[-13:]), 'time': 'Reversal (Weeks)', 'tf': 'Daily'}
+        elif last_d['Buy_Setup'] == 9: dm_data = {'type': 'BUY 9', 'target': price*1.05, 'stop': min(df['Low'].iloc[-9:]), 'time': 'Bounce (1-4 Days)', 'tf': 'Daily'}
+        elif last_d['Sell_Setup'] == 9: dm_data = {'type': 'SELL 9', 'target': price*0.95, 'stop': max(df['High'].iloc[-9:]), 'time': 'Pullback (1-4 Days)', 'tf': 'Daily'}
         
-        # Daily DeMark Logic
-        if last_d['Buy_Countdown'] == 13: 
-            dm_sig = {'type': 'BUY 13', 'target': price*1.15, 'stop': d_lows, 'time': 'Reversal', 'tf': 'Daily'}
-        elif last_d['Sell_Countdown'] == 13: 
-            dm_sig = {'type': 'SELL 13', 'target': price*0.85, 'stop': d_highs, 'time': 'Reversal', 'tf': 'Daily'}
-        elif last_d['Buy_Setup'] == 9: 
-            dm_sig = {'type': 'BUY 9', 'target': price*1.05, 'stop': df['Low'].iloc[-9:].min(), 'time': 'Bounce', 'tf': 'Daily'}
-        elif last_d['Sell_Setup'] == 9: 
-            dm_sig = {'type': 'SELL 9', 'target': price*0.95, 'stop': df['High'].iloc[-9:].max(), 'time': 'Pullback', 'tf': 'Daily'}
+        # Weekly
+        if last_w['Buy_Countdown'] == 13: dm_data = {'type': 'BUY 13', 'target': price*1.30, 'stop': min(df_weekly['Low'].iloc[-13:]), 'time': 'Major Bottom', 'tf': 'Weekly'}
+        elif last_w['Sell_Countdown'] == 13: dm_data = {'type': 'SELL 13', 'target': price*0.70, 'stop': max(df_weekly['High'].iloc[-13:]), 'time': 'Major Top', 'tf': 'Weekly'}
+        elif last_w['Buy_Setup'] == 9: dm_data = {'type': 'BUY 9', 'target': price*1.10, 'stop': min(df_weekly['Low'].iloc[-9:]), 'time': 'Trend Exhaustion', 'tf': 'Weekly'}
+        elif last_w['Sell_Setup'] == 9: dm_data = {'type': 'SELL 9', 'target': price*0.90, 'stop': max(df_weekly['High'].iloc[-9:]), 'time': 'Trend Exhaustion', 'tf': 'Weekly'}
         
-        # Perfection Check
         d_perf = False
-        if dm_sig:
-            try:
-                if '13' in dm_sig['type']: d_perf = True # 13 is always perfected
-                elif 'BUY 9' in dm_sig['type']: d_perf = (df['Low'].iloc[-1] < df['Low'].iloc[-3] and df['Low'].iloc[-1] < df['Low'].iloc[-4])
-                elif 'SELL 9' in dm_sig['type']: d_perf = (df['High'].iloc[-1] > df['High'].iloc[-3] and df['High'].iloc[-1] > df['High'].iloc[-4])
-                dm_sig['perfected'] = d_perf
-            except: d_perf = False # Handle short history edge case
+        if dm_data:
+            if '13' in dm_data['type']: d_perf = True
+            elif 'BUY 9' in dm_data['type']: d_perf = (df['Low'].iloc[-1] < df['Low'].iloc[-3] and df['Low'].iloc[-1] < df['Low'].iloc[-4])
+            elif 'SELL 9' in dm_data['type']: d_perf = (df['High'].iloc[-1] > df['High'].iloc[-3] and df['High'].iloc[-1] > df['High'].iloc[-4])
+            dm_data['perfected'] = d_perf
+            dm_sig = dm_data
         
-        # RSI Logic
         rsi_sig = None
-        rsi_val = last_d['RSI']
-        if rsi_val < 30: rsi_sig = {'type': 'OVERSOLD', 'val': rsi_val, 'target': df['Close'].rolling(20).mean().iloc[-1]}
-        elif rsi_val > 70: rsi_sig = {'type': 'OVERBOUGHT', 'val': rsi_val, 'target': df['Close'].rolling(20).mean().iloc[-1]}
+        if last_d['RSI'] < 30: rsi_sig = {'type': 'OVERSOLD', 'val': last_d['RSI'], 'target': df['Close'].rolling(20).mean().iloc[-1], 'stop': min(df['Low'].iloc[-5:]), 'time': 'Snapback (1-3 Days)'}
+        elif last_d['RSI'] > 70: rsi_sig = {'type': 'OVERBOUGHT', 'val': last_d['RSI'], 'target': df['Close'].rolling(20).mean().iloc[-1], 'stop': max(df['High'].iloc[-5:]), 'time': 'Snapback (1-3 Days)'}
         
-        # Squeeze Logic
         sq_sig = None
-        if d_sq['status']: sq_sig = {'tf': 'Daily', 'move': d_sq['move'], 'bias': d_sq['bias']}
-        elif w_sq['status']: sq_sig = {'tf': 'Weekly', 'move': w_sq['move'], 'bias': w_sq['bias']}
+        if d_sq['status']: sq_sig = {'tf': 'Daily', 'move': d_sq['move'], 'bias': d_sq['bias'], 'time': 'Imminent'}
+        elif w_sq['status']: sq_sig = {'tf': 'Weekly', 'move': w_sq['move'], 'bias': w_sq['bias'], 'time': 'Building'}
         
-        # Trend
-        sma200 = df['Close'].rolling(200).mean().iloc[-1] if len(df) > 200 else df['Close'].rolling(50).mean().iloc[-1]
+        # Portfolio Context
+        sma200 = df['Close'].rolling(200).mean().iloc[-1]
         trend = "BULLISH" if price > sma200 else "BEARISH"
-        macd_sig = "Bullish" if df['MACD'].iloc[-1] > df['Signal_Line'].iloc[-1] else "Bearish"
+        macd_val = df['MACD'].iloc[-1]
+        macd_sig = "Bullish" if macd_val > df['Signal_Line'].iloc[-1] else "Bearish"
         
-        # Cross logic
+        # Cross logic for alert section
         tech_alert = None
         if (df['MACD'].iloc[-1] > df['Signal_Line'].iloc[-1] and df['MACD'].iloc[-2] < df['Signal_Line'].iloc[-2]): 
-            tech_alert = {'type': 'BULLISH MACD CROSS', 'target': price * 1.05, 'stop': price * 0.95, 'time': 'Trend Change'}
+            tech_alert = {'type': 'BULLISH MACD CROSS', 'target': price + (atr.iloc[-1]*2), 'stop': price - (atr.iloc[-1]*1.5), 'time': 'Trend Change'}
         elif (df['MACD'].iloc[-1] < df['Signal_Line'].iloc[-1] and df['MACD'].iloc[-2] > df['Signal_Line'].iloc[-2]):
-            tech_alert = {'type': 'BEARISH MACD CROSS', 'target': price * 0.95, 'stop': price * 1.05, 'time': 'Trend Change'}
+            tech_alert = {'type': 'BEARISH MACD CROSS', 'target': price - (atr.iloc[-1]*2), 'stop': price + (atr.iloc[-1]*1.5), 'time': 'Trend Change'}
 
-        # Verdict
+        # Overall Verdict
         verdict = "HOLD"
         if dm_sig and "BUY" in dm_sig['type']: verdict = "BUY (Signal)"
         elif dm_sig and "SELL" in dm_sig['type']: verdict = "SELL (Signal)"
@@ -457,18 +367,14 @@ def analyze_ticker(ticker, is_portfolio=False):
             'ticker': ticker, 'price': price,
             'demark': dm_sig, 'rsi': rsi_sig, 'squeeze': sq_sig, 'perfected': d_perf, 'tech': tech_alert,
             'verdict': verdict, 'trend': trend, 'count': count_str, 
-            'rsi_val': rsi_val, 'macd_sig': macd_sig
+            'rsi_val': last_d['RSI'], 'macd_sig': macd_sig, 'adx': f"{last_d['ADX']:.0f}"
         }
-    except Exception as e: 
-        # print(f"Error analyzing {ticker}: {e}")
-        return None
+    except: return None
 
 # ==========================================================
 #  MAIN EXECUTION
 # ==========================================================
 if __name__ == "__main__":
-    print(f"🚀 Starting Institutional Scanner | {datetime.datetime.now()}")
-    
     print("1. Generating Macro Report...")
     macro_data = get_shared_macro_data()
     radar_txt, radar_regime = get_market_radar_regime(macro_data)
@@ -483,11 +389,11 @@ if __name__ == "__main__":
     print("2. Analyzing Portfolio...")
     port_msg = "💼 **CURRENT PORTFOLIO INTELLIGENCE** 💼\n"
     
+    # Calculate Overall Health
     port_data = []
     bull_count = 0; bear_count = 0
-    
     for ticker in CURRENT_PORTFOLIO:
-        res = analyze_ticker(ticker, is_portfolio=True)
+        res = analyze_ticker(ticker, is_portfolio=True) # Explicitly allow portfolio items
         if res:
             port_data.append(res)
             if "BUY" in res['verdict'] or "BULLISH" in res['verdict']: bull_count += 1
@@ -514,15 +420,13 @@ if __name__ == "__main__":
     send_telegram_alert(port_msg)
     
     print("3. Scanning Tickers...")
-    # Combine all lists
-    full_universe = list(set(STRATEGIC_TICKERS + get_top_200_cryptos_tickers() + get_top_futures() + get_sp500_tickers() + get_nasdaq_tickers()))
+    full_universe = list(set(STRATEGIC_TICKERS + get_top_200_cryptos() + get_top_futures() + get_sp500_tickers() + get_nasdaq_tickers()))
     print(f"Scanning {len(full_universe)} tickers...")
     
     power_list = []; perfected_list = []; unperfected_list = []; rsi_list = []; squeeze_list = []; tech_list = []
     
     for i, ticker in enumerate(full_universe):
-        if i % 50 == 0: print(f"Processing {i}/{len(full_universe)}...")
-        
+        if i % 100 == 0: print(f"Processing {i}/{len(full_universe)}...")
         res = analyze_ticker(ticker)
         if res:
             d = res['demark']
@@ -543,14 +447,13 @@ if __name__ == "__main__":
             if res['squeeze']: squeeze_list.append(res)
             if res['tech']: tech_list.append(res)
             
-        # Be nice to APIs
-        time.sleep(0.05)
+        time.sleep(0.01)
         
     # --- REPORT GENERATION ---
     msg = "🔔 **INSTITUTIONAL SCANNER RESULTS** 🔔\n"
     
     if power_list:
-        msg += "\n🔥 **POWER RANKINGS (High Conviction)** 🔥\n"
+        msg += "\n🔥 **POWER RANKINGS (Perfected + Confluence)** 🔥\n"
         for s in power_list[:15]:
             p = format_price(s['price'])
             d = s['demark']
@@ -566,7 +469,7 @@ if __name__ == "__main__":
             if s in power_list: continue 
             d = s['demark']; p = format_price(s['price'])
             icon = "🟢" if "BUY" in d['type'] else "🔴"
-            msg += f"{icon} **{s['ticker']}**: {d['type']} ({d['tf']}) @ {p}\n   └ 🎯 Target: {format_price(d['target'])}\n"
+            msg += f"{icon} **{s['ticker']}**: {d['type']} ({d['tf']}) @ {p}\n   └ 🎯 Target: {format_price(d['target'])} | 🛑 Stop: {format_price(d['stop'])}\n   └ ⏳ Timing: {d['time']}\n"
 
     if tech_list:
         msg += "\n🌊 **MOMENTUM & TREND (MACD Cross)**\n"
@@ -574,7 +477,7 @@ if __name__ == "__main__":
             if s in power_list: continue
             t = s['tech']; p = format_price(s['price'])
             icon = "🟢" if "BULLISH" in t['type'] else "🔴"
-            msg += f"{icon} **{s['ticker']}**: {t['type']} @ {p}\n"
+            msg += f"{icon} **{s['ticker']}**: {t['type']} @ {p}\n   └ 🎯 Target: {format_price(t['target'])} | 🛑 Stop: {format_price(t['stop'])}\n   └ ⏳ Timing: {t['time']}\n"
 
     if unperfected_list:
         msg += "\n⚠️ **UNPERFECTED SIGNALS (Watchlist Only)**\n"
@@ -590,7 +493,7 @@ if __name__ == "__main__":
             if s in power_list: continue
             r = s['rsi']; p = format_price(s['price'])
             icon = "🟢" if r['type'] == "OVERSOLD" else "🔴"
-            msg += f"{icon} **{s['ticker']}**: {r['type']} ({r['val']:.0f}) @ {p}\n"
+            msg += f"{icon} **{s['ticker']}**: {r['type']} ({r['val']:.0f}) @ {p}\n   └ 🎯 Reversion: {format_price(r['target'])}\n"
 
     if squeeze_list:
         msg += "\n3️⃣ **VOLATILITY SQUEEZES**\n"
@@ -598,7 +501,7 @@ if __name__ == "__main__":
         for s in squeeze_list[:10]:
             if s in power_list: continue
             sq = s['squeeze']; p = format_price(s['price'])
-            msg += f"⚠️ **{s['ticker']}**: {sq['tf']} Squeeze ({sq['bias']}) @ {p}\n"
+            msg += f"⚠️ **{s['ticker']}**: {sq['tf']} Squeeze ({sq['bias']}) @ {p}\n   └ Exp. Move: +/- {format_price(sq['move'])}\n"
 
     if not (power_list or perfected_list or unperfected_list):
         msg = "No DeMark signals found today."

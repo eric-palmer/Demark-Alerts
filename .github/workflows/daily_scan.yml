@@ -2,8 +2,8 @@ name: Run Scanner
 
 on:
   schedule:
-    - cron: '0 21 * * 1-5' # Runs Mon-Fri at 4pm CST
-  workflow_dispatch:      # Allows manual run button
+    - cron: '0 21 * * 1-5' # Runs Mon-Fri at 4pm EST
+  workflow_dispatch:
 
 jobs:
   build:
@@ -16,13 +16,11 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11' 
+          python-version: '3.11'
 
       - name: Install libraries
-        # Added lxml and html5lib for Wikipedia scraping
         run: |
-          pip install --upgrade pip
-          pip install --upgrade yfinance pandas requests pandas-datareader scipy numpy lxml html5lib
+          pip install yfinance pandas requests lxml pandas-datareader
 
       - name: Run Scanner
         env:

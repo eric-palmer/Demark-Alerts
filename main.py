@@ -51,6 +51,15 @@ STRATEGIC_TICKERS = [
     'KHC', 'LULU', 'YETI', 'DLR', 'EQIX', 'ORCL', 'LSF'
 ]
 
+CRYPTO_MAP = {
+    'BTC-USD': 'bitcoin',
+    'ETH-USD': 'ethereum',
+    'SOL-USD': 'solana',
+    'DOGE-USD': 'dogecoin',
+    'SHIB-USD': 'shiba-inu',
+    'PEPE-USD': 'pepe',
+}
+
 # --- HELPER FUNCTIONS ---
 def send_telegram_alert(message):
     token = os.environ.get('TELEGRAM_TOKEN')
@@ -61,10 +70,13 @@ def send_telegram_alert(message):
     for i in range(0, len(message), max_len):
         chunk = message[i:i+max_len]
         try:
-            requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
+            response = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
                           json={"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"})
+            if not response.ok:
+                print(f"Telegram error: {response.json()}")
             time.sleep(1)
-        except: pass
+        except Exception as e:
+            print(f"Telegram send error: {e}")
 
 def format_price(price):
     if price is None: return "N/A"
@@ -82,17 +94,49 @@ def get_session():
     })
     return session
 
-def safe_download(ticker, retries=3):
+def safe_download(ticker, retries=5):
+    session = get_session()
     for i in range(retries):
         try:
-            session = get_session()
             df = yf.download(ticker, period="2y", progress=False, auto_adjust=True, session=session)
             if df.empty or len(df) < 50: 
-                time.sleep(1); continue
+                time.sleep(2); continue
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             return df
-        except: time.sleep(2)
+        except Exception as e:
+            print(f"yfinance error for {ticker}: {e}")
+            time.sleep(2)
+    
+    # Fallback for crypto
+    if ticker in CRYPTO_MAP:
+        id_ = CRYPTO_MAP[ticker]
+        try:
+            url_ohlc = f"https://api.coingecko.com/api/v3/coins/{id_}/ohlc?vs_currency=usd&days=730"
+            resp_ohlc = session.get(url_ohlc, timeout=10)
+            if resp_ohlc.status_code != 200:
+                raise ValueError(f"CoinGecko OHLC error: {resp_ohlc.text}")
+            data_ohlc = resp_ohlc.json()
+            df = pd.DataFrame(data_ohlc, columns=['timestamp', 'Open', 'High', 'Low', 'Close'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            
+            url_vol = f"https://api.coingecko.com/api/v3/coins/{id_}/market_chart?vs_currency=usd&days=730&interval=daily"
+            resp_vol = session.get(url_vol, timeout=10)
+            if resp_vol.status_code != 200:
+                raise ValueError(f"CoinGecko volume error: {resp_vol.text}")
+            data_vol = resp_vol.json()
+            timestamps_vol = [v[0] for v in data_vol['total_volumes']]
+            volumes = [v[1] for v in data_vol['total_volumes']]
+            df_vol = pd.DataFrame({'Volume': volumes}, index=pd.to_datetime(timestamps_vol, unit='ms'))
+            
+            df = df.join(df_vol, how='left')
+            if len(df) < 50:
+                return None
+            return df
+        except Exception as e:
+            print(f"CoinGecko fallback error for {ticker}: {e}")
+    
     return None
 
 def get_top_futures():
@@ -213,6 +257,54 @@ def calc_shannon(df):
         return {'near_term': near_term, 'avwap': last['AVWAP'], 'breakout': breakout}
     except: return None
 
+def calc_macd(df, fast=12, slow=26, signal=9):
+    try:
+        ema_fast = df['Close'].ewm(span=fast, adjust=False).mean()
+        ema_slow = df['Close'].ewm(span=slow, adjust=False).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+        histogram = macd_line - signal_line
+        return macd_line, signal_line, histogram
+    except:
+        return pd.Series([0]*len(df)), pd.Series([0]*len(df)), pd.Series([0]*len(df))
+
+def calc_stochastic(df, k_period=14, d_period=3):
+    try:
+        low_min = df['Low'].rolling(window=k_period).min()
+        high_max = df['High'].rolling(window=k_period).max()
+        k_line = 100 * (df['Close'] - low_min) / (high_max - low_min)
+        d_line = k_line.rolling(window=d_period).mean()
+        return k_line, d_line
+    except:
+        return pd.Series([50]*len(df)), pd.Series([50]*len(df))
+
+def calc_adx(df, period=14):
+    try:
+        high_diff = df['High'] - df['High'].shift(1)
+        low_diff = df['Low'].shift(1) - df['Low']
+        plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+        minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+        plus_dm = pd.Series(plus_dm, index=df.index)
+        minus_dm = pd.Series(minus_dm, index=df.index)
+        
+        tr = pd.concat([
+            df['High'] - df['Low'],
+            abs(df['High'] - df['Close'].shift(1)),
+            abs(df['Low'] - df['Close'].shift(1))
+        ], axis=1).max(axis=1)
+        
+        atr = tr.rolling(window=period).mean()
+        
+        plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+        
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+        adx = dx.rolling(window=period).mean()
+        
+        return adx, plus_di, minus_di
+    except:
+        return pd.Series([0]*len(df)), pd.Series([0]*len(df)), pd.Series([0]*len(df))
+
 # --- ANALYSIS ENGINE ---
 def analyze_ticker(ticker, is_portfolio=False):
     try:
@@ -234,11 +326,15 @@ def analyze_ticker(ticker, is_portfolio=False):
         fib = calc_fib(df)
         shannon = calc_shannon(df)
         
+        macd_line, signal_line, macd_hist = calc_macd(df)
+        sto_k, sto_d = calc_stochastic(df)
+        adx, plus_di, minus_di = calc_adx(df)
+        
         last_d = df.iloc[-1]; last_w = df_weekly.iloc[-1]
         price = last_d['Close']
         
         # Targets (ATR)
-        tr = df['High'] - df['Low']
+        tr = pd.concat([df['High'] - df['Low'], abs(df['High'] - df['Close'].shift()), abs(df['Low'] - df['Close'].shift())], axis=1).max(axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
         p_target = price + (atr*2)
         p_stop = price - (atr*1.5)
@@ -268,6 +364,26 @@ def analyze_ticker(ticker, is_portfolio=False):
         if d_sq: sq_sig = {'tf': 'Daily', 'bias': d_sq['bias'], 'move': d_sq['move']}
         elif w_sq: sq_sig = {'tf': 'Weekly', 'bias': w_sq['bias'], 'move': w_sq['move']}
         
+        # --- MACD LOGIC ---
+        macd_sig = None
+        if macd_hist.iloc[-1] > 0 and macd_hist.iloc[-2] <= 0:
+            macd_sig = {'type': 'BULLISH CROSS'}
+        elif macd_hist.iloc[-1] < 0 and macd_hist.iloc[-2] >= 0:
+            macd_sig = {'type': 'BEARISH CROSS'}
+        
+        # --- STOCHASTIC LOGIC ---
+        sto_sig = None
+        if sto_k.iloc[-1] > sto_d.iloc[-1] and sto_k.iloc[-2] <= sto_d.iloc[-2] and sto_k.iloc[-1] < 20:
+            sto_sig = {'type': 'BULLISH CROSS OVERSOLD'}
+        elif sto_k.iloc[-1] < sto_d.iloc[-1] and sto_k.iloc[-2] >= sto_d.iloc[-2] and sto_k.iloc[-1] > 80:
+            sto_sig = {'type': 'BEARISH CROSS OVERBOUGHT'}
+        
+        # --- ADX LOGIC ---
+        adx_sig = None
+        if adx.iloc[-1] > 25:
+            dir_ = 'UPTREND' if plus_di.iloc[-1] > minus_di.iloc[-1] else 'DOWNTREND'
+            adx_sig = {'strength': 'STRONG', 'direction': dir_}
+        
         # --- PORTFOLIO SUMMARY ---
         trend = "BULLISH" if price > df['Close'].rolling(200).mean().iloc[-1] else "BEARISH"
         
@@ -280,6 +396,7 @@ def analyze_ticker(ticker, is_portfolio=False):
         return {
             'ticker': ticker, 'price': price,
             'demark': dm_sig, 'rsi': rsi_sig, 'squeeze': sq_sig, 'fib': fib, 'shannon': shannon,
+            'macd': macd_sig, 'stochastic': sto_sig, 'adx': adx_sig,
             'trend': trend, 'verdict': verdict, 'target': p_target, 'stop': p_stop,
             'rsi_val': last_d['RSI'],
             'count': f"Buy {last_d['Buy_Setup']}" if last_d['Buy_Setup'] > 0 else f"Sell {last_d['Sell_Setup']}"
@@ -316,6 +433,9 @@ if __name__ == "__main__":
             p_msg += f"🔹 **{t}**: {res['verdict']} @ {p}\n   └ 🎯 Target: {tgt} | 🛑 Stop: {stp}\n   └ ⏳ Timing: 1-4 Weeks (Swing)\n   └ 📊 Techs: {res['trend']} | RSI: {res['rsi_val']:.0f} | 5-EMA: {res['shannon']['near_term']}\n   └ DeMark: {res['count']}\n"
             if res['demark']: p_msg += f"   🚨 SIGNAL: {res['demark']['type']} ({'Perf' if res['demark'].get('perfected') else 'Unperf'})\n"
             if res['squeeze']: p_msg += f"   ⚠️ SQUEEZE: {res['squeeze']['tf']} ({res['squeeze']['bias']})\n"
+            if res['macd']: p_msg += f"   📈 MACD: {res['macd']['type']}\n"
+            if res['stochastic']: p_msg += f"   📉 Stochastic: {res['stochastic']['type']}\n"
+            if res['adx']: p_msg += f"   💪 ADX: {res['adx']['strength']} {res['adx']['direction']}\n"
             p_msg += "\n"
     send_telegram_alert(p_msg)
     
@@ -323,6 +443,7 @@ if __name__ == "__main__":
     print("3. Scanning Universe...")
     universe = list(set(STRATEGIC_TICKERS + get_top_futures()))
     power = []; perfected = []; unperf = []; sq_list = []; fib_list = []; shannon_list = []
+    macd_list = []; sto_list = []; adx_list = []
     
     for t in universe:
         res = analyze_ticker(t)
@@ -330,13 +451,16 @@ if __name__ == "__main__":
         
         d = res['demark']
         score = 0
-        if d and d.get('perfected'): score += 1
+        if d and d.get('perfected'): score += 2  # Higher weight for perfected DeMark
         if res['rsi']: score += 1
         if res['squeeze']: score += 1
         if res['fib']: score += 1
         if res['shannon']['breakout']: score += 1
+        if res['macd']: score += 1
+        if res['stochastic']: score += 1
+        if res['adx']: score += 1
         
-        if score >= 2 and d and d.get('perfected'): power.append(res)
+        if score >= 3: power.append(res)  # Raised threshold for more conviction
         
         if d:
             if d.get('perfected'): perfected.append(res)
@@ -344,6 +468,9 @@ if __name__ == "__main__":
         if res['squeeze']: sq_list.append(res)
         if res['fib']: fib_list.append(res)
         if res['shannon']['breakout']: shannon_list.append(res)
+        if res['macd']: macd_list.append(res)
+        if res['stochastic']: sto_list.append(res)
+        if res['adx']: adx_list.append(res)
         
         time.sleep(0.1)
         
@@ -369,6 +496,27 @@ if __name__ == "__main__":
         for s in shannon_list[:10]:
             if s in power: continue
             a_msg += f"🔵 **{s['ticker']}**: 10/20 SMA Cross (Bullish)\n   └ Above 50 SMA | 5-EMA Support\n"
+
+    if macd_list:
+        a_msg += "\n📈 **MACD CROSSOVERS**\n"
+        for s in macd_list[:10]:
+            if s in power: continue
+            m = s['macd']
+            a_msg += f"⚡ **{s['ticker']}**: {m['type']} @ {format_price(s['price'])}\n"
+
+    if sto_list:
+        a_msg += "\n📉 **STOCHASTIC SIGNALS**\n"
+        for s in sto_list[:10]:
+            if s in power: continue
+            st = s['stochastic']
+            a_msg += f"🌀 **{s['ticker']}**: {st['type']} @ {format_price(s['price'])}\n"
+
+    if adx_list:
+        a_msg += "\n💪 **STRONG TRENDS (ADX)**\n"
+        for s in adx_list[:10]:
+            if s in power: continue
+            a = s['adx']
+            a_msg += f"📊 **{s['ticker']}**: {a['strength']} {a['direction']} @ {format_price(s['price'])}\n"
 
     if sq_list:
         a_msg += "\n💥 **VOLATILITY SQUEEZES**\n"

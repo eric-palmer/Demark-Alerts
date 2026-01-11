@@ -2,3 +2,6 @@ pandas
 numpy
 yfinance
 requests
+tiingo
+lxml
+html5lib

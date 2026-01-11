@@ -2,28 +2,24 @@ name: Run Scanner
 
 on:
   schedule:
-    - cron: '0 21 * * *'  # Runs daily at 4pm EST (9pm UTC)
+    - cron: '0 21 * * *'
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4  # Updated to latest version for better performance
-
-      - name: Set up Python
-        uses: actions/setup-python@v5  # Updated to latest setup action
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'  # Bumped to latest stable (script is compatible)
-
-      - name: Install libraries
-        run: |
-          pip install yfinance pandas requests numpy  # Removed lxml and pandas-datareader; added numpy
-
-      - name: Run Scanner
+          python-version: '3.12'
+      - name: Install
+        run: pip install yfinance pandas requests numpy
+      - name: Run
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: python main.py

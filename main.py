@@ -1,4 +1,4 @@
-# main.py - Institutional Trading Engine with State Management
+# main.py - Institutional Engine (Crash Safe)
 import os
 import sqlite3
 import datetime
@@ -14,8 +14,7 @@ from utils import send_telegram, fmt_price
 
 # --- Configuration ---
 DB_FILE = "trading_state.db"
-MAX_WORKERS = 6  # Reduced to prevent API choking
-RISK_UNIT = 10000 # Dollar amount for position sizing calculations
+MAX_WORKERS = 6 
 
 # --- Ticker Universe ---
 CURRENT_PORTFOLIO = ['SLV', 'DJT']
@@ -39,30 +38,24 @@ STRATEGIC_TICKERS = [
 # --- Database & State Management ---
 
 def init_db():
-    """Initialize SQLite database for scan state tracking"""
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS scan_log (
-                ticker TEXT,
-                scan_date TEXT,
-                status TEXT,
+                ticker TEXT, scan_date TEXT, status TEXT,
                 PRIMARY KEY (ticker, scan_date)
             )
         """)
 
 def is_scanned_today(ticker):
-    """Check if ticker was already processed today"""
     today = datetime.datetime.now().strftime('%Y-%m-%d')
     with sqlite3.connect(DB_FILE) as conn:
-        cur = conn.cursor()
-        res = cur.execute(
+        res = conn.execute(
             "SELECT 1 FROM scan_log WHERE ticker=? AND scan_date=? AND status='OK'", 
             (ticker, today)
         ).fetchone()
         return res is not None
 
 def log_scan(ticker, status="OK"):
-    """Mark ticker as scanned"""
     today = datetime.datetime.now().strftime('%Y-%m-%d')
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(
@@ -73,10 +66,6 @@ def log_scan(ticker, status="OK"):
 # --- Analytic Logic ---
 
 def analyze_ticker(ticker, macro_regime=None):
-    """
-    Core Analysis Engine
-    Returns dict of signals or None if no data
-    """
     try:
         df = safe_download(ticker)
         if df is None: return None
@@ -84,84 +73,61 @@ def analyze_ticker(ticker, macro_regime=None):
         # 1. Calculate Indicators
         df['RSI'] = calc_rsi(df['Close'])
         df = calc_demark(df)
-        
-        # Squeeze
         sq_res = calc_squeeze(df)
-        
-        # Trend
         shannon = calc_shannon(df)
         macd, macd_sig, macd_hist = calc_macd(df)
-        stoch_k, stoch_d = calc_stoch(df)
         adx, pdi, mdi = calc_adx(df)
         
-        # 2. Extract Latest Values
         last = df.iloc[-1]
         price = last['Close']
         
-        # 3. Trend Definition
         sma_200 = df['Close'].rolling(200).mean().iloc[-1]
         trend = "BULLISH" if price > sma_200 else "BEARISH"
         
-        # 4. Signal Synthesis
         signals = {
             'ticker': ticker,
             'price': price,
             'trend': trend,
             'score': 0,
             'setup': None,
-            'demark_count': 0, # Raw count
+            'demark_count': 0,
             'squeeze': sq_res,
             'rsi': last['RSI'],
             'shannon': shannon,
             'adx': adx.iloc[-1]
         }
         
-        # --- Scoring Logic (The "Brain") ---
+        # --- Scoring ---
         score = 0
         
-        # A. DeMark Setup (Store Raw Count + Score if 9)
-        buy_seq = last['Buy_Setup']
-        sell_seq = last['Sell_Setup']
+        # DeMark
+        buy_seq = last.get('Buy_Setup', 0)
+        sell_seq = last.get('Sell_Setup', 0)
         
         if buy_seq >= 1:
             signals['demark_count'] = f"Buy {int(buy_seq)}"
             if buy_seq == 9:
-                signals['setup'] = {'type': 'BUY', 'perfected': last['Perfected']}
-                score += 3 if last['Perfected'] else 2
+                signals['setup'] = {'type': 'BUY', 'perfected': last.get('Perfected', False)}
+                score += 3 if last.get('Perfected', False) else 2
         elif sell_seq >= 1:
             signals['demark_count'] = f"Sell {int(sell_seq)}"
             if sell_seq == 9:
-                signals['setup'] = {'type': 'SELL', 'perfected': last['Perfected']}
-                score += 3 if last['Perfected'] else 2
+                signals['setup'] = {'type': 'SELL', 'perfected': last.get('Perfected', False)}
+                score += 3 if last.get('Perfected', False) else 2
             
-        # B. RSI Extremes
-        if last['RSI'] < 30: score += 2  # Oversold
-        if last['RSI'] > 70: score += 2  # Overbought
-        
-        # C. Squeeze
+        # Indicators
+        if last['RSI'] < 30: score += 2
+        if last['RSI'] > 70: score += 2
         if sq_res: score += 2
-        
-        # D. Momentum Breakout (AlphaTrends)
         if shannon['breakout']: score += 3
-        
-        # E. MACD Cross
         if macd_hist.iloc[-1] > 0 and macd_hist.iloc[-2] <= 0: score += 1
         
-        # F. Liquidity Filter (Macro Overlay)
-        # If Risk Off, penalize Buy signals, boost Sell signals
+        # Liquidity Filter
         if macro_regime == 'RISK_OFF':
-            if signals.get('setup') and signals['setup']['type'] == 'BUY':
-                score -= 2 # Fade buys in bad macro
-            if trend == 'BEARISH':
-                score += 1 # Trend alignment
+            if signals.get('setup') and signals['setup']['type'] == 'BUY': score -= 2
+            if trend == 'BEARISH': score += 1
                 
         signals['score'] = score
-        
-        # 5. Target/Stop Calculation (ATR Based)
-        tr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
-        signals['stop'] = price - (tr * 2) # Wide stop
-        signals['target'] = price + (tr * 3)
-        
         return signals
 
     except Exception as e:
@@ -169,125 +135,97 @@ def analyze_ticker(ticker, macro_regime=None):
         return None
 
 def format_alert(s, is_portfolio=False):
-    """Format single alert for Telegram
-    is_portfolio=True -> Show ALL details
-    is_portfolio=False -> Show only active signals
-    """
     icon = "🟢" if s['trend'] == "BULLISH" else "🔴"
     msg = f"{icon} *{s['ticker']}* @ {fmt_price(s['price'])}\n"
     msg += f"Score: {s['score']}/10\n"
     
-    # --- DeMark (Show count if Portfolio OR if Setup exists) ---
-    if is_portfolio or s['setup']:
-        if s['setup']:
-            p_mark = "⭐" if s['setup']['perfected'] else "○"
-            msg += f"• DeMark: {s['setup']['type']} 9 {p_mark}\n"
-        elif is_portfolio:
-            msg += f"• DeMark: {s['demark_count']}\n"
+    if s['setup']:
+        p_mark = "⭐" if s['setup']['perfected'] else "○"
+        msg += f"• DeMark: {s['setup']['type']} 9 {p_mark}\n"
+    elif is_portfolio and s['demark_count']:
+        msg += f"• DeMark: {s['demark_count']}\n"
             
-    # --- Squeeze ---
-    if is_portfolio or s['squeeze']:
-        if s['squeeze']:
-            msg += f"• Squeeze: {s['squeeze']['bias']} Ready\n"
-        elif is_portfolio:
-            msg += f"• Squeeze: None\n"
+    if s['squeeze']:
+        msg += f"• Squeeze: {s['squeeze']['bias']} Ready\n"
             
-    # --- Momentum ---
     if s['shannon']['breakout']:
         msg += f"• Momentum: BREAKOUT 🚀\n"
     
-    # --- Standard Indicators (Always show for Portfolio) ---
     if is_portfolio:
         msg += f"• RSI: {s['rsi']:.1f}\n"
         msg += f"• ADX: {s['adx']:.1f}\n"
     else:
-        # For scanner, only show extreme RSI
         if s['rsi'] < 30 or s['rsi'] > 70:
             msg += f"• RSI: {s['rsi']:.1f}\n"
 
     return msg + "\n"
 
-# --- Main Execution Flow ---
+# --- Main Execution ---
 
 if __name__ == "__main__":
     print("="*60)
     print("INSTITUTIONAL ENGINE STARTUP")
     print("="*60)
     
-    # 1. Initialize State
     init_db()
     
-    # 2. Get Macro Regime
     print("[1/4] Analyzing Macro...")
     macro = get_macro()
     regime = "NEUTRAL"
-    if macro and 'net_liq' in macro:
-        # Simple 3-month ROC of Net Liq
-        liq_chg = macro['net_liq'].pct_change(63).iloc[-1]
-        regime = "RISK_ON" if liq_chg > 0 else "RISK_OFF"
-        
+    liq_msg = "UNKNOWN"
+    
+    # CRASH PROTECTION: Check if net_liq exists before math
+    if macro and macro.get('net_liq') is not None:
+        try:
+            liq_chg = macro['net_liq'].pct_change(63).iloc[-1]
+            regime = "RISK_ON" if liq_chg > 0 else "RISK_OFF"
+            liq_msg = "⬆️" if regime == "RISK_ON" else "⬇️"
+        except Exception as e:
+            print(f"Liquidity math error: {e}")
+            
     msg = f"📊 *MARKET REGIME: {regime}*\n"
-    if macro:
+    if macro and macro.get('spy') is not None:
         msg += f"SPY: {fmt_price(macro['spy'].iloc[-1])}\n"
-        if 'net_liq' in macro:
-            msg += f"Liquidity Trend: {'⬆️' if regime=='RISK_ON' else '⬇️'}\n"
+    msg += f"Liquidity Trend: {liq_msg}\n"
     send_telegram(msg)
     
-    # 3. Scan Portfolio (Always Scan These)
     print("\n[2/4] Scanning Portfolio...")
     port_msg = "💼 *PORTFOLIO UPDATE*\n\n"
     for t in CURRENT_PORTFOLIO:
         res = analyze_ticker(t, regime)
         if res:
-            # Force full detail for portfolio
             port_msg += format_alert(res, is_portfolio=True)
     send_telegram(port_msg)
     
-    # 4. Batch Scan Universe
     print("\n[3/4] Scanning Universe...")
     universe = list(set(STRATEGIC_TICKERS + get_futures()))
     to_scan = [t for t in universe if not is_scanned_today(t)]
     
-    print(f"   Total Universe: {len(universe)}")
     print(f"   Remaining to scan: {len(to_scan)}")
     
     high_conviction = []
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Map futures to tickers
         future_map = {executor.submit(analyze_ticker, t, regime): t for t in to_scan}
-        
         completed = 0
         for future in as_completed(future_map):
             ticker = future_map[future]
             try:
                 res = future.result()
                 log_scan(ticker, "OK" if res else "FAIL")
-                
                 if res and res['score'] >= 4:
-                    print(f"   ⭐ FOUND: {ticker} (Score: {res['score']})")
+                    print(f"   ⭐ {ticker} ({res['score']})")
                     high_conviction.append(res)
-                
                 completed += 1
-                if completed % 10 == 0:
-                    print(f"   Progress: {completed}/{len(to_scan)}")
-                    
-            except Exception as e:
-                print(f"   Fail {ticker}: {e}")
-                log_scan(ticker, "ERROR")
+            except:
+                pass
 
-    # 5. Alerting
     print("\n[4/4] Sending Alerts...")
     if high_conviction:
-        # Sort by score highest first
         high_conviction.sort(key=lambda x: x['score'], reverse=True)
-        
         alert_msg = "🚨 *HIGH CONVICTION SETUP*\n\n"
-        for res in high_conviction[:10]: # Top 10 only
+        for res in high_conviction[:10]:
             alert_msg += format_alert(res, is_portfolio=False)
-            
         send_telegram(alert_msg)
-    else:
-        print("   No high conviction setups found today.")
         
-    print("\n✓ ENGINE SHUTDOWN")
+    print("\n✓ ENGINE COMPLETE")

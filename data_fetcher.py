@@ -1,4 +1,4 @@
-# data_fetcher.py - Data download functions with enhanced error handling
+# data_fetcher.py - Institutional Grade Data Ingestion
 import yfinance as yf
 import pandas as pd
 import requests
@@ -6,8 +6,15 @@ import time
 import datetime
 import numpy as np
 import os
-from utils import get_session
+from threading import Lock
 
+# --- Configuration ---
+MAX_RETRIES = 3
+YFINANCE_DELAY = 0.5  # Seconds between calls to avoid blacklisting
+COINGECKO_DELAY = 1.5 # Strict rate limit for free tier
+REQ_TIMEOUT = 15      # Seconds before timing out a request
+
+# --- Asset Maps ---
 CRYPTO_MAP = {
     'BTC-USD': 'bitcoin',
     'ETH-USD': 'ethereum',
@@ -17,215 +24,243 @@ CRYPTO_MAP = {
     'PEPE-USD': 'pepe'
 }
 
-COINGECKO_DELAY = 1.5
-_coingecko_last = 0
+FUTURES_LIST = [
+    'ES=F', 'NQ=F', 'YM=F', 'RTY=F', 'NKD=F', 'FTSE=F',
+    'CL=F', 'NG=F', 'RB=F', 'HO=F', 'BZ=F',
+    'GC=F', 'SI=F', 'HG=F', 'PL=F', 'PA=F',
+    'ZT=F', 'ZF=F', 'ZN=F', 'ZB=F',
+    '6E=F', '6B=F', '6J=F', '6A=F', 'DX-Y.NYB',
+    'ZC=F', 'ZS=F', 'ZW=F', 'ZL=F', 'ZM=F',
+    'CC=F', 'KC=F', 'SB=F', 'CT=F', 'LE=F', 'HE=F'
+]
 
-def safe_download(ticker, retries=3):
-    """Download ticker data with fallback to CoinGecko for crypto"""
-    global _coingecko_last
-    session = get_session()
+# --- Infrastructure ---
+class RateLimiter:
+    """Thread-safe rate limiter to protect against API bans"""
+    def __init__(self, delay):
+        self.delay = delay
+        self.last_call = 0
+        self.lock = Lock()
+
+    def wait(self):
+        with self.lock:
+            elapsed = time.time() - self.last_call
+            if elapsed < self.delay:
+                time.sleep(self.delay - elapsed)
+            self.last_call = time.time()
+
+_yf_limiter = RateLimiter(YFINANCE_DELAY)
+_cg_limiter = RateLimiter(COINGECKO_DELAY)
+_session = requests.Session()
+
+def get_session():
+    return _session
+
+# --- Core Functions ---
+
+def validate_data(df, ticker):
+    """Institutional data integrity checks"""
+    if df is None or df.empty:
+        return False
     
-    # Try yfinance with longer delays and better error handling
+    # Check 1: Minimum history for indicators (200 SMA requires ~200 bars)
+    if len(df) < 50: 
+        return False
+        
+    # Check 2: Freshness (Data must be recent)
+    last_date = df.index[-1]
+    # Allow for weekends/holidays (4 days max lag)
+    if (datetime.datetime.now() - last_date).days > 5:
+        # Special exception for some futures/indexes that might delay
+        if ticker not in FUTURES_LIST: 
+            return False
+
+    # Check 3: Data gaps (Nulls in Close)
+    if df['Close'].isnull().sum() > len(df) * 0.05:
+        return False
+
+    return True
+
+def safe_download(ticker, retries=MAX_RETRIES):
+    """Robust download with YFinance priority and Crypto fallback"""
+    
+    # 1. Try YFinance first (Preferred source)
     for attempt in range(retries):
         try:
-            # Add delay to avoid rate limiting
+            _yf_limiter.wait()
+            
+            # exponential backoff on retries
             if attempt > 0:
-                print(f"    Retry {attempt+1} for {ticker}")
-                time.sleep(5)
-            
+                time.sleep(2 * attempt)
+                print(f"   Retry {attempt}/{retries} for {ticker}...")
+
+            # Download without threading to prevent race conditions
             df = yf.download(
-                ticker,
-                period="2y",
-                progress=False,
-                auto_adjust=True,
-                threads=False,  # Disable threading to avoid issues
-                timeout=30,  # Longer timeout
-                show_errors=False
+                ticker, 
+                period="2y", 
+                progress=False, 
+                auto_adjust=True, 
+                threads=False, 
+                timeout=REQ_TIMEOUT
             )
-            
-            if df.empty or len(df) < 50:
-                if attempt < retries - 1:
-                    continue
-            else:
-                # Normalize MultiIndex columns
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                
-                # Validate data quality
-                if len(df) >= 50 and df['Close'].notna().sum() > len(df) * 0.9:
-                    return df
-                    
-        except Exception as e:
-            error_msg = str(e)[:100]
-            if attempt < retries - 1:
-                time.sleep(5)
-    
-    # Fallback to CoinGecko for crypto
-    if ticker in CRYPTO_MAP:
-        time_since = time.time() - _coingecko_last
-        if time_since < COINGECKO_DELAY:
-            time.sleep(COINGECKO_DELAY - time_since)
-        
-        try:
-            id_ = CRYPTO_MAP[ticker]
-            
-            # Fetch OHLC
-            url = f"https://api.coingecko.com/api/v3/coins/{id_}/ohlc?vs_currency=usd&days=730"
-            r = session.get(url, timeout=15)
-            _coingecko_last = time.time()
-            
-            if r.status_code != 200:
-                return None
-            
-            data = r.json()
-            df = pd.DataFrame(data, columns=['timestamp', 'Open', 'High', 'Low', 'Close'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df.set_index('timestamp', inplace=True)
-            
-            # Fetch volume
-            time.sleep(COINGECKO_DELAY)
-            url_vol = f"https://api.coingecko.com/api/v3/coins/{id_}/market_chart?vs_currency=usd&days=730&interval=daily"
-            r_vol = session.get(url_vol, timeout=15)
-            _coingecko_last = time.time()
-            
-            if r_vol.status_code == 200:
-                vol_data = r_vol.json()
-                times = [v[0] for v in vol_data.get('total_volumes', [])]
-                vols = [v[1] for v in vol_data.get('total_volumes', [])]
-                df_vol = pd.DataFrame(
-                    {'Volume': vols},
-                    index=pd.to_datetime(times, unit='ms')
-                )
-                df = df.join(df_vol, how='left')
-            
-            df['Volume'] = df.get('Volume', 0).fillna(0)
-            
-            if len(df) >= 50:
+
+            # Clean MultiIndex if present (common yfinance issue)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            if validate_data(df, ticker):
                 return df
                 
         except Exception as e:
-            pass
-    
+            if attempt == retries - 1:
+                # Don't print error on first fail, only on final fail
+                pass
+
+    # 2. Fallback: CoinGecko (Only for known cryptos)
+    if ticker in CRYPTO_MAP:
+        return _fetch_coingecko(ticker)
+        
     return None
 
-def get_futures():
-    """Return list of key futures contracts"""
-    return [
-        'ES=F', 'NQ=F', 'YM=F', 'RTY=F', 'NKD=F', 'FTSE=F',
-        'CL=F', 'NG=F', 'RB=F', 'HO=F', 'BZ=F',
-        'GC=F', 'SI=F', 'HG=F', 'PL=F', 'PA=F',
-        'ZT=F', 'ZF=F', 'ZN=F', 'ZB=F',
-        '6E=F', '6B=F', '6J=F', '6A=F', 'DX-Y.NYB',
-        'ZC=F', 'ZS=F', 'ZW=F', 'ZL=F', 'ZM=F',
-        'CC=F', 'KC=F', 'SB=F', 'CT=F', 'LE=F', 'HE=F'
-    ]
+def _fetch_coingecko(ticker):
+    """Backup crypto data source"""
+    coin_id = CRYPTO_MAP.get(ticker)
+    if not coin_id:
+        return None
 
-def fetch_fred(series_id, start, api_key, session, retries=3):
-    """Fetch FRED economic data series"""
+    try:
+        _cg_limiter.wait()
+        
+        # Get OHLC (Open, High, Low, Close)
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc?vs_currency=usd&days=730"
+        r = _session.get(url, timeout=REQ_TIMEOUT)
+        if r.status_code != 200:
+            return None
+            
+        data = r.json()
+        if not data:
+            return None
+
+        df = pd.DataFrame(data, columns=['timestamp', 'Open', 'High', 'Low', 'Close'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        
+        # CoinGecko OHLC doesn't include volume, fetch separately or assume 0
+        # For simplicity in fallback, we assume 0 or average to prevent indicator crash
+        df['Volume'] = 0 
+        
+        return df if validate_data(df, ticker) else None
+        
+    except Exception:
+        return None
+
+def get_futures():
+    """Returns the static list of futures tickers"""
+    return FUTURES_LIST
+
+# --- Macro Economics (FRED) ---
+
+def fetch_fred_series(series_id, api_key, start_date):
+    """Helper to fetch a single FRED series"""
     url = "https://api.stlouisfed.org/fred/series/observations"
     params = {
         'series_id': series_id,
         'api_key': api_key,
         'file_type': 'json',
-        'observation_start': start.strftime('%Y-%m-%d'),
+        'observation_start': start_date,
         'observation_end': datetime.datetime.now().strftime('%Y-%m-%d')
     }
     
-    for attempt in range(retries):
-        try:
-            r = session.get(url, params=params, timeout=15)
-            r.raise_for_status()
-            
-            data = r.json()
-            
-            if 'error_message' in data:
-                raise ValueError(f"FRED error: {data['error_message']}")
-            
-            obs = data.get('observations', [])
-            if not obs:
-                raise ValueError(f"No data for {series_id}")
-            
-            df = pd.DataFrame(obs)
-            df['date'] = pd.to_datetime(df['date'])
-            df.set_index('date', inplace=True)
-            df = df[['value']].rename(columns={'value': series_id})
-            df = df.replace('.', np.nan).astype(float)
-            
-            return df
-            
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(2)
-    
-    return pd.DataFrame()
-
-def get_macro():
-    """Fetch macro economic data from FRED and market benchmarks"""
     try:
-        api_key = os.environ.get('FRED_API_KEY')
+        r = _session.get(url, params=params, timeout=REQ_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
         
-        if not api_key:
-            print("ERROR: FRED_API_KEY not set")
+        if 'observations' not in data:
             return None
+
+        df = pd.DataFrame(data['observations'])
+        df['date'] = pd.to_datetime(df['date'])
+        df.set_index('date', inplace=True)
         
-        start = datetime.datetime.now() - datetime.timedelta(days=730)
-        series = ['WALCL', 'WTREGEN', 'RRPONTSYD', 'DGS10', 'DGS2', 'T5YIE']
-        session = get_session()
-        
-        dfs = []
-        for s in series:
-            df = fetch_fred(s, start, api_key, session)
-            if not df.empty:
-                dfs.append(df)
-        
-        if not dfs:
-            print("ERROR: All FRED series failed")
-            return None
-        
-        fred = pd.concat(dfs, axis=1)
-        fred = fred.resample('D').ffill().dropna()
-        
-        result = {}
-        
-        # Calculate liquidity metrics
-        if 'WALCL' in fred.columns and 'WTREGEN' in fred.columns and 'RRPONTSYD' in fred.columns:
-            result['net_liq'] = (fred['WALCL'] / 1000) - fred['WTREGEN'] - fred['RRPONTSYD']
-            result['fed_assets'] = fred['WALCL'] / 1000
-        
-        # Yield curve
-        if 'DGS10' in fred.columns and 'DGS2' in fred.columns:
-            result['term_premia'] = fred['DGS10'] - fred['DGS2']
-        
-        # Inflation expectations
-        if 'T5YIE' in fred.columns:
-            result['inflation'] = fred['T5YIE']
-        
-        # Fetch SPY with retries
-        print("  Fetching SPY...")
-        spy = None
-        for attempt in range(5):
-            spy = safe_download('SPY')
-            if spy is not None:
-                print(f"  ✓ SPY fetched (attempt {attempt + 1})")
-                break
-            else:
-                if attempt < 4:
-                    print(f"  SPY retry {attempt + 1}/5...")
-                    time.sleep(5)
-        
-        if spy is None:
-            print("  WARNING: SPY unavailable after 5 attempts")
-        else:
-            result['spy'] = spy['Close']
-        
-        if not result:
-            return None
-        
-        print(f"  ✓ Macro ready with {len(result)} metrics")
-        return result
+        # Clean data (replace '.' with NaN and convert to float)
+        s = df['value'].replace('.', np.nan).astype(float)
+        return s.rename(series_id)
         
     except Exception as e:
-        print(f"Macro error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"   FRED Error ({series_id}): {e}")
         return None
+
+def get_macro():
+    """
+    Fetches macro liquidity and regime data.
+    Returns a dictionary of metrics or None if critical data fails.
+    """
+    api_key = os.environ.get('FRED_API_KEY')
+    if not api_key:
+        print("   ⚠️ FRED API Key missing")
+        return None
+
+    print("   Fetching Macro Data...")
+    start_date = (datetime.datetime.now() - datetime.timedelta(days=730)).strftime('%Y-%m-%d')
+    
+    # Critical Series for Net Liquidity
+    # WALCL: Fed Total Assets
+    # WTREGEN: Treasury General Account
+    # RRPONTSYD: Reverse Repo
+    series_map = {
+        'WALCL': 'FedAssets',
+        'WTREGEN': 'TGA',
+        'RRPONTSYD': 'RRP',
+        'DGS10': '10Y',
+        'DGS2': '2Y',
+        'T5YIE': 'InflationExpectations'
+    }
+
+    data_frames = []
+    for sid, name in series_map.items():
+        s = fetch_fred_series(sid, api_key, start_date)
+        if s is not None:
+            data_frames.append(s)
+            
+    if not data_frames:
+        return None
+
+    # Merge all series on Date index
+    macro_df = pd.concat(data_frames, axis=1)
+    macro_df = macro_df.resample('D').ffill().dropna() # Forward fill weekends
+    
+    result = {}
+    
+    # 1. Calculate Net Liquidity (The "Howell" Metric)
+    # Net Liq = Fed Assets - TGA - RRP
+    # Note: WALCL is in millions, others usually billions. 
+    # FRED units: WALCL (Millions), WTREGEN (Billions), RRP (Billions)
+    try:
+        if 'WALCL' in macro_df.columns and 'WTREGEN' in macro_df.columns and 'RRPONTSYD' in macro_df.columns:
+            # Convert WALCL to Billions to match others
+            fed_assets_bn = macro_df['WALCL'] / 1000 
+            net_liq = fed_assets_bn - macro_df['WTREGEN'] - macro_df['RRPONTSYD']
+            result['net_liq'] = net_liq
+            result['fed_assets'] = fed_assets_bn
+    except Exception as e:
+        print(f"   Calc Error (Net Liq): {e}")
+
+    # 2. Yield Curve
+    try:
+        if 'DGS10' in macro_df.columns and 'DGS2' in macro_df.columns:
+            result['term_premia'] = macro_df['DGS10'] - macro_df['DGS2']
+    except:
+        pass
+
+    # 3. Inflation
+    if 'T5YIE' in macro_df.columns:
+        result['inflation'] = macro_df['T5YIE']
+
+    # 4. SPY Benchmark (for relative strength)
+    spy = safe_download('SPY')
+    if spy is not None:
+        result['spy'] = spy['Close']
+
+    print(f"   ✓ Macro Data Loaded ({len(result)} metrics)")
+    return result

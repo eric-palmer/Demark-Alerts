@@ -38,56 +38,6 @@ STRATEGIC_TICKERS = [
     'DNA', 'TWST', 'GLW', 'KHC', 'LULU', 'YETI', 'DLR', 'EQIX', 'ORCL', 'LSF'
 ]
 
-def get_market_radar_regime(macro):
-    """
-    Market Radar Methodology:
-    Quadrant 1: Growth ⬆️ Inflation ⬇️ -> RISK ON (Goldilocks)
-    Quadrant 2: Growth ⬆️ Inflation ⬆️ -> REFLATION
-    Quadrant 3: Growth ⬇️ Inflation ⬇️ -> SLOWDOWN
-    Quadrant 4: Growth ⬇️ Inflation ⬆️ -> RISK OFF (Stagflation)
-    """
-    try:
-        growth = macro.get('growth')
-        inflation = macro.get('inflation')
-        
-        if growth is None or inflation is None:
-            # Fallback to Liquidity Only if Growth/Inflation data missing
-            if macro.get('net_liq') is not None:
-                if macro['net_liq'].iloc[-1] > macro['net_liq'].iloc[-63]:
-                    return "LIQUIDITY EXPANSION", "Fed Adding Liquidity (Growth Data Missing)"
-            return "NEUTRAL", "Macro Data Unavailable"
-            
-        # Calculate 3-Month Momentum
-        # Safety: Ensure we have enough data points
-        if len(growth) < 4 or len(inflation) < 64:
-             return "NEUTRAL", "Insufficient Macro History"
-
-        g_impulse = growth.pct_change(3).iloc[-1]
-        i_impulse = inflation.pct_change(63).iloc[-1]
-        
-        regime = "NEUTRAL"
-        desc = ""
-        
-        if g_impulse > 0:
-            if i_impulse < 0:
-                regime = "RISK_ON"
-                desc = "GOLDILOCKS (Growth ⬆️ Inf ⬇️) - Tech/Stocks"
-            else:
-                regime = "REFLATION"
-                desc = "HEATING UP (Growth ⬆️ Inf ⬆️) - Commodities/Cyclicals"
-        else:
-            if i_impulse < 0:
-                regime = "SLOWDOWN"
-                desc = "COOLING (Growth ⬇️ Inf ⬇️) - Bonds/Defensives"
-            else:
-                regime = "RISK_OFF"
-                desc = "STAGFLATION (Growth ⬇️ Inf ⬆️) - Cash/Energy"
-                
-        return regime, desc
-    except Exception as e:
-        print(f"Regime Calc Error: {e}")
-        return "NEUTRAL", "Calc Error"
-
 def safe_int(val):
     """Prevents crash when converting NaN to int"""
     try:
@@ -95,13 +45,40 @@ def safe_int(val):
         return int(val)
     except: return 0
 
+def get_market_radar_regime(macro):
+    try:
+        growth = macro.get('growth')
+        inflation = macro.get('inflation')
+        
+        if growth is None or inflation is None:
+            # Fallback to Liquidity Check if Growth Data Missing
+            if macro.get('net_liq') is not None:
+                nl = macro['net_liq']
+                if len(nl) > 63 and nl.iloc[-1] > nl.iloc[-63]:
+                    return "LIQUIDITY EXPANSION", "Fed Adding Liquidity (Growth Data Missing)"
+            return "NEUTRAL", "Macro Data Unavailable"
+            
+        if len(growth) < 4 or len(inflation) < 64:
+             return "NEUTRAL", "Insufficient Macro History"
+
+        g_impulse = growth.pct_change(3).iloc[-1]
+        i_impulse = inflation.pct_change(63).iloc[-1]
+        
+        if g_impulse > 0:
+            if i_impulse < 0: return "RISK_ON", "GOLDILOCKS (Growth ⬆️ Inf ⬇️)"
+            else: return "REFLATION", "HEATING UP (Growth ⬆️ Inf ⬆️)"
+        else:
+            if i_impulse < 0: return "SLOWDOWN", "COOLING (Growth ⬇️ Inf ⬇️)"
+            else: return "RISK_OFF", "STAGFLATION (Growth ⬇️ Inf ⬆️)"
+    except:
+        return "NEUTRAL", "Calc Error"
+
 def analyze_ticker(ticker, regime):
     try:
         client = get_tiingo_client()
         df = safe_download(ticker, client)
         if df is None: return None
 
-        # Filter Illiquid (except crypto/futures)
         if '=F' not in ticker and '-USD' not in ticker:
             last_vol = df['Volume'].iloc[-5:].mean() * df['Close'].iloc[-1]
             if last_vol < 500000: return None 
@@ -124,7 +101,6 @@ def analyze_ticker(ticker, regime):
         setup = {'active': False, 'msg': "None", 'target': 0, 'stop': 0, 'time': ''}
         score = 0
         
-        # 1. DeMark
         if last.get('Buy_Setup') == 9:
             perf = last.get('Perfected')
             score += 3 if perf else 2
@@ -134,13 +110,11 @@ def analyze_ticker(ticker, regime):
             score += 3 if perf else 2
             setup = {'active': True, 'msg': f"DeMark SELL 9 {'(Perfected)' if perf else ''}", 'target': price-(atr*3), 'stop': price+(atr*1.5), 'time': '1-4 Weeks'}
             
-        # 2. Squeeze
         if sq_res and not setup['active']:
             score += 2
             d = sq_res['bias']
             setup = {'active': True, 'msg': f"TTM Squeeze ({d})", 'target': price+(atr*4) if d=="BULLISH" else price-(atr*4), 'stop': price-(atr*2) if d=="BULLISH" else price+(atr*2), 'time': '3-10 Days'}
             
-        # 3. RSI
         if last['RSI'] < 30: 
             score += 2
             if not setup['active']: setup = {'active': True, 'msg': "RSI Oversold", 'target': price+(atr*2), 'stop': price-atr, 'time': '1-3 Days'}
@@ -150,7 +124,6 @@ def analyze_ticker(ticker, regime):
                 
         if shannon['breakout']: score += 3
         
-        # Regime Overlay
         if "RISK_OFF" in regime and "BUY" in setup['msg']: score -= 2
         if "SLOWDOWN" in regime and "BUY" in setup['msg']: score -= 1
         
@@ -171,14 +144,13 @@ def format_portfolio_card(res):
     icon = "🟢" if res['trend'] == "BULLISH" else "🔴"
     msg = f"{icon} *{res['ticker']}* @ {fmt_price(res['price'])}\n"
     
-    # Safely format numbers (handle NaNs)
     adx_val = res['adx'] if pd.notna(res['adx']) else 0.0
     rsi_val = res['rsi'] if pd.notna(res['rsi']) else 50.0
     
     msg += f"Score: {res['score']}/10 | ADX: {adx_val:.1f}\n"
     msg += f"────────────────\n"
     
-    # Safe Integer Conversion for DeMark
+    # SAFE INT conversion prevents crash
     dm_c = safe_int(res.get('demark_count', 0))
     msg += f"• **DeMark:** Count {dm_c}\n"
     
@@ -221,7 +193,6 @@ if __name__ == "__main__":
     
     send_telegram(f"🏗️ *SCAN STARTED*\nAssets: {len(full_list)}\nBatches: {len(batches)}\nEst. Time: {est_time} mins")
 
-    # 1. Macro (Crash Proof)
     try:
         macro = get_macro()
         regime, desc = get_market_radar_regime(macro)
@@ -231,7 +202,6 @@ if __name__ == "__main__":
         
     send_telegram(f"📊 *MARKET REGIME: {regime}*\n{desc}")
 
-    # 2. PRIORITY: Scan Portfolio IMMEDIATE
     print("Scanning Portfolio...")
     port_results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -245,12 +215,10 @@ if __name__ == "__main__":
         port_msg += format_portfolio_card(r)
     send_telegram(port_msg)
 
-    # 3. Batch Scan (The Rest)
     remaining_list = [t for t in STRATEGIC_TICKERS if t not in CURRENT_PORTFOLIO]
     batches = [remaining_list[i:i + BATCH_SIZE] for i in range(0, len(remaining_list), BATCH_SIZE)]
     
     all_results = []
-    
     for i, batch in enumerate(batches):
         print(f"Processing Batch {i+1}/{len(batches)}...")
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -262,7 +230,6 @@ if __name__ == "__main__":
         if i < len(batches) - 1:
             print(f"Sleeping {SLEEP_TIME}s..."); time.sleep(SLEEP_TIME)
 
-    # 4. Final Report
     print("Generating Final Report...")
     scan_msg = "🚨 *HIGH CONVICTION OPPORTUNITIES*\n\n"
     all_results.sort(key=lambda x: x['score'], reverse=True)

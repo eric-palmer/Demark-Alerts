@@ -1,4 +1,4 @@
-# data_fetcher.py - Institutional Router (Deduplicated)
+# data_fetcher.py - Institutional Data (Type-Safe)
 import pandas as pd
 import time
 import os
@@ -13,46 +13,37 @@ def get_tiingo_client():
     return TiingoClient({'api_key': api_key, 'session': True}) if api_key else None
 
 def fetch_tiingo(ticker, client):
-    """Institutional Source: Tiingo (Clean & Deduped)"""
+    """Institutional Source: Tiingo"""
     try:
         # 1. Crypto Handling
         if '-USD' in ticker:
             sym = ticker.replace('-USD', '').lower() + 'usd'
             data = client.get_crypto_price_history(tickers=[sym], startDate='2022-01-01', resampleFreq='1day')
             df = pd.DataFrame(data[0].get('priceData', []))
-            
-            # Crypto is simple, just map keys
             rename = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
             df = df.rename(columns=rename)
         
-        # 2. Stock Handling (The Fix for Duplicates)
+        # 2. Stock Handling (Force RAW Data)
         else:
             df = client.get_dataframe(ticker, startDate='2022-01-01')
-            
-            # PRIORITY: Keep Adjusted columns, drop raw ones to prevent 'High' vs 'High' collision
-            if 'adjClose' in df.columns:
-                df = df[['adjOpen', 'adjHigh', 'adjLow', 'adjClose', 'adjVolume']]
-                df.columns = ['Open', 'High', 'Low', 'Close', 'Volume'] # Direct rename
-            else:
-                # Fallback if no adj columns (rare)
-                rename = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
-                df = df.rename(columns=rename)
+            # Use RAW columns (open, high, low, close) to avoid Adj logic errors
+            df = df[['open', 'high', 'low', 'close', 'volume']]
+            df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
 
         df['Date'] = pd.to_datetime(df.index).tz_localize(None)
         df = df.set_index('Date')
         
-        # Final Verification
-        if 'High' not in df.columns or 'Close' not in df.columns: return None
-        
-        # Remove any lingering duplicates just in case
-        df = df.loc[:, ~df.columns.duplicated()]
-        
-        return df
+        # --- THE FIX: FORCE NUMBERS ---
+        # This prevents "Object" types from breaking ADX/DeMark
+        for c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+            
+        return df.dropna()
     except Exception:
         return None
 
 def fetch_fallback(ticker):
-    """Backup Source: Yahoo (Nuclear Flat)"""
+    """Backup Source: Yahoo"""
     try:
         dat = yf.Ticker(ticker)
         df = dat.history(period="2y", auto_adjust=True)
@@ -70,25 +61,19 @@ def fetch_fallback(ticker):
         for c in ['Open', 'High', 'Low', 'Close']:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors='coerce')
-        
-        # Deduplicate
-        df = df.loc[:, ~df.columns.duplicated()]
         return df
     except: return None
 
 def safe_download(ticker, client=None):
     """Smart Router"""
-    # Futures -> Yahoo
     if any(x in ticker for x in ['=F', 'DX-Y', '=X']):
         return fetch_fallback(ticker)
 
     df = None
-    # Priority: Tiingo
     if client:
         time.sleep(PAUSE_SEC)
         df = fetch_tiingo(ticker, client)
     
-    # Fallback: Yahoo
     if df is None or len(df) < 5:
         df = fetch_fallback(ticker)
         
@@ -99,7 +84,7 @@ def safe_download(ticker, client=None):
     return None
 
 def get_macro():
-    """Context Fetcher (Crash Proof)"""
+    """Context Fetcher"""
     spy = fetch_fallback('SPY')
     api_key = os.environ.get('FRED_API_KEY')
     result = {'net_liq': None, 'spy': None}

@@ -1,4 +1,4 @@
-# data_fetcher.py - Institutional Router (Gap-Filling Fix)
+# data_fetcher.py - Institutional Data (Raw & Filled)
 import pandas as pd
 import time
 import os
@@ -15,26 +15,33 @@ def get_tiingo_client():
 def fetch_tiingo(ticker, client):
     """Institutional Source: Tiingo"""
     try:
+        # 1. Crypto Handling (btcusd)
         if '-USD' in ticker:
             sym = ticker.replace('-USD', '').lower() + 'usd'
             data = client.get_crypto_price_history(tickers=[sym], startDate='2022-01-01', resampleFreq='1day')
             df = pd.DataFrame(data[0].get('priceData', []))
             rename = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
             df = df.rename(columns=rename)
+        
+        # 2. Stock Handling (FORCE RAW DATA)
         else:
+            # We request everything but manually select the raw columns
             df = client.get_dataframe(ticker, startDate='2022-01-01')
-            # Select only raw columns to avoid confusion
-            df = df[['open', 'high', 'low', 'close', 'volume']]
-            df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+            # Select RAW columns to match broker prices
+            # If keys missing, fallback to whatever is there
+            cols = [c for c in ['open', 'high', 'low', 'close', 'volume'] if c in df.columns]
+            df = df[cols]
+            
+            rename = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
+            df = df.rename(columns=rename)
 
         df['Date'] = pd.to_datetime(df.index).tz_localize(None)
         df = df.set_index('Date')
         
-        # FORCE NUMBERS & FILL GAPS
+        # Force numeric & Fill Gaps (Crucial for ADX)
         for c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
             
-        # Critical: Forward fill any missing days so math doesn't break
         return df.ffill().dropna()
     except Exception:
         return None
@@ -75,17 +82,14 @@ def safe_download(ticker, client=None):
         df = fetch_fallback(ticker)
         
     if df is not None:
-        # Final safety check: must have enough data for ADX(14)
+        # Final safety: Ensure we have enough rows for ADX(14)
         if len(df) > 20: 
             return df
             
     return None
 
 def get_macro():
-    """
-    Market Radar Inputs (Robust)
-    Returns None safely if keys missing or API fails
-    """
+    """Market Radar Inputs"""
     api_key = os.environ.get('FRED_API_KEY')
     result = {'growth': None, 'inflation': None, 'net_liq': None}
     
@@ -99,25 +103,23 @@ def get_macro():
                 df = pd.DataFrame(r.json()['observations'])
                 return pd.to_numeric(df['value'], errors='coerce')
             
-            # 1. Growth (ISM PMI)
+            # Growth (ISM)
             ism = get('NAPM')
             if ism is not None and not ism.empty: result['growth'] = ism
             
-            # 2. Inflation (Breakevens)
+            # Inflation (Breakevens)
             inf = get('T5YIE')
             if inf is not None and not inf.empty: result['inflation'] = inf
 
-            # 3. Liquidity
+            # Liquidity
             walcl = get('WALCL')
             tga = get('WTREGEN')
             rrp = get('RRPONTSYD')
             
             if all(x is not None and not x.empty for x in [walcl, tga, rrp]):
-                # Align lengths (simple slice)
+                # Slice to min length to align
                 min_len = min(len(walcl), len(tga), len(rrp))
                 result['net_liq'] = (walcl.iloc[-min_len:].values/1000) - tga.iloc[-min_len:].values - rrp.iloc[-min_len:].values
-                # Convert back to Series for pct_change later
                 result['net_liq'] = pd.Series(result['net_liq'])
-                
         except: pass
     return result

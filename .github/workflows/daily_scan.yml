@@ -1,8 +1,8 @@
-- name: Run
-  env:
-    TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-    TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-    FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-  run: |
-    python test_scan.py
-    python main.py
+name: Daily Scan
+
+on:
+  schedule:
+    - cron: '30 21 * * 1-5'  # Your existing scheduled time
+  
+  # ADD THIS SECTION BELOW:
+  workflow_dispatch:         # This enables the manual "Run" button

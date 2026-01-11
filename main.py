@@ -109,6 +109,7 @@ def analyze_ticker(ticker, macro_regime=None):
             'trend': trend,
             'score': 0,
             'setup': None,
+            'demark_count': 0, # Raw count
             'squeeze': sq_res,
             'rsi': last['RSI'],
             'shannon': shannon,
@@ -118,13 +119,20 @@ def analyze_ticker(ticker, macro_regime=None):
         # --- Scoring Logic (The "Brain") ---
         score = 0
         
-        # A. DeMark Setup
-        if last['Buy_Setup'] == 9:
-            signals['setup'] = {'type': 'BUY', 'perfected': last['Perfected']}
-            score += 3 if last['Perfected'] else 2
-        elif last['Sell_Setup'] == 9:
-            signals['setup'] = {'type': 'SELL', 'perfected': last['Perfected']}
-            score += 3 if last['Perfected'] else 2
+        # A. DeMark Setup (Store Raw Count + Score if 9)
+        buy_seq = last['Buy_Setup']
+        sell_seq = last['Sell_Setup']
+        
+        if buy_seq >= 1:
+            signals['demark_count'] = f"Buy {int(buy_seq)}"
+            if buy_seq == 9:
+                signals['setup'] = {'type': 'BUY', 'perfected': last['Perfected']}
+                score += 3 if last['Perfected'] else 2
+        elif sell_seq >= 1:
+            signals['demark_count'] = f"Sell {int(sell_seq)}"
+            if sell_seq == 9:
+                signals['setup'] = {'type': 'SELL', 'perfected': last['Perfected']}
+                score += 3 if last['Perfected'] else 2
             
         # B. RSI Extremes
         if last['RSI'] < 30: score += 2  # Oversold
@@ -160,23 +168,43 @@ def analyze_ticker(ticker, macro_regime=None):
         print(f"Error analyzing {ticker}: {e}")
         return None
 
-def format_alert(s):
-    """Format single alert for Telegram"""
+def format_alert(s, is_portfolio=False):
+    """Format single alert for Telegram
+    is_portfolio=True -> Show ALL details
+    is_portfolio=False -> Show only active signals
+    """
     icon = "🟢" if s['trend'] == "BULLISH" else "🔴"
     msg = f"{icon} *{s['ticker']}* @ {fmt_price(s['price'])}\n"
     msg += f"Score: {s['score']}/10\n"
     
-    if s['setup']:
-        p_mark = "⭐" if s['setup']['perfected'] else "○"
-        msg += f"• DeMark: {s['setup']['type']} 9 {p_mark}\n"
-        
-    if s['squeeze']:
-        msg += f"• Squeeze: {s['squeeze']['bias']} Ready\n"
-        
+    # --- DeMark (Show count if Portfolio OR if Setup exists) ---
+    if is_portfolio or s['setup']:
+        if s['setup']:
+            p_mark = "⭐" if s['setup']['perfected'] else "○"
+            msg += f"• DeMark: {s['setup']['type']} 9 {p_mark}\n"
+        elif is_portfolio:
+            msg += f"• DeMark: {s['demark_count']}\n"
+            
+    # --- Squeeze ---
+    if is_portfolio or s['squeeze']:
+        if s['squeeze']:
+            msg += f"• Squeeze: {s['squeeze']['bias']} Ready\n"
+        elif is_portfolio:
+            msg += f"• Squeeze: None\n"
+            
+    # --- Momentum ---
     if s['shannon']['breakout']:
         msg += f"• Momentum: BREAKOUT 🚀\n"
-        
-    msg += f"• RSI: {s['rsi']:.1f}\n"
+    
+    # --- Standard Indicators (Always show for Portfolio) ---
+    if is_portfolio:
+        msg += f"• RSI: {s['rsi']:.1f}\n"
+        msg += f"• ADX: {s['adx']:.1f}\n"
+    else:
+        # For scanner, only show extreme RSI
+        if s['rsi'] < 30 or s['rsi'] > 70:
+            msg += f"• RSI: {s['rsi']:.1f}\n"
+
     return msg + "\n"
 
 # --- Main Execution Flow ---
@@ -211,7 +239,8 @@ if __name__ == "__main__":
     for t in CURRENT_PORTFOLIO:
         res = analyze_ticker(t, regime)
         if res:
-            port_msg += format_alert(res)
+            # Force full detail for portfolio
+            port_msg += format_alert(res, is_portfolio=True)
     send_telegram(port_msg)
     
     # 4. Batch Scan Universe
@@ -255,7 +284,7 @@ if __name__ == "__main__":
         
         alert_msg = "🚨 *HIGH CONVICTION SETUP*\n\n"
         for res in high_conviction[:10]: # Top 10 only
-            alert_msg += format_alert(res)
+            alert_msg += format_alert(res, is_portfolio=False)
             
         send_telegram(alert_msg)
     else:

@@ -16,6 +16,7 @@ def get_tiingo_client():
 def fetch_tiingo(ticker, client):
     """Institutional Source: Tiingo"""
     try:
+        # Get 2 years of data to ensure indicators warm up
         start_date = (datetime.datetime.now() - datetime.timedelta(days=730)).strftime('%Y-%m-%d')
         
         # 1. Crypto
@@ -26,11 +27,10 @@ def fetch_tiingo(ticker, client):
             rename = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
             df = df.rename(columns=rename)
         
-        # 2. Stocks (Use standard fetch to get adjusted data correctly)
+        # 2. Stocks 
         else:
             df = client.get_dataframe(ticker, startDate=start_date)
-            # Use Tiingo's adjusted columns if available (standard for technicals)
-            # If your SLV is $72, Tiingo's adjClose is likely the correct one to use
+            # Prefer Adjusted Data for technicals, fallback to raw
             if 'adjClose' in df.columns:
                 df = df[['adjOpen', 'adjHigh', 'adjLow', 'adjClose', 'adjVolume']]
                 df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
@@ -41,11 +41,12 @@ def fetch_tiingo(ticker, client):
         df['Date'] = pd.to_datetime(df.index).tz_localize(None)
         df = df.set_index('Date')
         
-        # FORCE CLEANING
+        # --- CRITICAL FIXES ---
+        # 1. Force everything to numbers (coercing errors to NaN)
         for c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
             
-        # THE FIX: Interpolate fills small gaps that break ADX
+        # 2. Bridge the Gaps (Interpolate missing days so ADX doesn't break)
         df = df.interpolate(method='time').ffill().bfill()
         
         return df

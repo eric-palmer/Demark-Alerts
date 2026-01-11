@@ -1,4 +1,4 @@
-# data_fetcher.py - The "Direct History" Fix
+# data_fetcher.py - The "Nuclear" Flattening Fix
 import yfinance as yf
 import pandas as pd
 import requests
@@ -42,48 +42,55 @@ _session = requests.Session()
 
 def safe_download(ticker, retries=MAX_RETRIES):
     """
-    Downloads data using the .history() method which returns 
-    CLEAN data (no multi-index headers) compared to .download()
+    Downloads data and aggressively flattens it to ensure
+    indicators can ALWAYS see the numbers.
     """
     for attempt in range(retries):
         try:
             _yf_limiter.wait()
             
-            # METHOD CHANGE: Use Ticker().history() for clean formatting
+            # Use Ticker object for cleaner raw data
             dat = yf.Ticker(ticker)
             df = dat.history(period="2y", auto_adjust=True)
             
             if df is None or df.empty:
                 continue
 
-            # 1. Standardize Columns (Capitalize first letter)
-            # yfinance .history returns 'Open', 'High', etc. usually correct,
-            # but we force rename just in case.
-            df = df.rename(columns={
-                'open': 'Open', 'high': 'High', 'low': 'Low', 
-                'close': 'Close', 'volume': 'Volume'
-            })
-
-            # 2. Ensure Timezone Naive (Fixes potential math errors)
-            if df.index.tz is not None:
-                df.index = df.index.tz_localize(None)
-
-            # 3. Numeric Coercion (The "Anti-Text" Shield)
+            # --- THE FIX: Aggressive Flattening ---
+            
+            # 1. Reset Index to make Date a column (removes complexity)
+            df = df.reset_index()
+            
+            # 2. Rename columns to standard lower case to find them easily
+            df.columns = [c.lower() for c in df.columns]
+            
+            # 3. Rename back to Capitalized standard for indicators
+            # We map whatever we found ('date', 'close', etc) to the Right Names
+            rename_map = {
+                'date': 'Date', 'open': 'Open', 'high': 'High', 
+                'low': 'Low', 'close': 'Close', 'volume': 'Volume'
+            }
+            df = df.rename(columns=rename_map)
+            
+            # 4. Set Date back as index
+            if 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
+                df = df.set_index('Date')
+            
+            # 5. Force Float Conversion (The "Anti-Text" Shield)
             cols = ['Open', 'High', 'Low', 'Close', 'Volume']
             for c in cols:
                 if c in df.columns:
-                    df[c] = pd.to_numeric(df[c], errors='coerce')
+                    # Coerce errors to NaN, then fill NaNs with previous value
+                    df[c] = pd.to_numeric(df[c], errors='coerce').ffill()
 
-            # 4. Check Length
+            # 6. Check Length
             if len(df) < 50:
                 continue
                 
             return df
                 
         except Exception as e:
-            if attempt == retries - 1:
-                # print(f"Failed {ticker}: {e}")
-                pass
             time.sleep(1)
             
     return None

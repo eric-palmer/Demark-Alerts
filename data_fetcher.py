@@ -1,4 +1,4 @@
-# data_fetcher.py - Data download functions
+# data_fetcher.py - Data download functions with enhanced error handling
 import yfinance as yf
 import pandas as pd
 import requests
@@ -25,21 +25,26 @@ def safe_download(ticker, retries=3):
     global _coingecko_last
     session = get_session()
     
-    # Try yfinance first
+    # Try yfinance with longer delays and better error handling
     for attempt in range(retries):
         try:
+            # Add delay to avoid rate limiting
+            if attempt > 0:
+                print(f"    Retry {attempt+1} for {ticker}")
+                time.sleep(5)
+            
             df = yf.download(
                 ticker,
                 period="2y",
                 progress=False,
                 auto_adjust=True,
-                session=session,
-                timeout=15
+                threads=False,  # Disable threading to avoid issues
+                timeout=30,  # Longer timeout
+                show_errors=False
             )
             
             if df.empty or len(df) < 50:
                 if attempt < retries - 1:
-                    time.sleep(2)
                     continue
             else:
                 # Normalize MultiIndex columns
@@ -51,8 +56,9 @@ def safe_download(ticker, retries=3):
                     return df
                     
         except Exception as e:
+            error_msg = str(e)[:100]
             if attempt < retries - 1:
-                time.sleep(2)
+                time.sleep(5)
     
     # Fallback to CoinGecko for crypto
     if ticker in CRYPTO_MAP:
@@ -98,7 +104,7 @@ def safe_download(ticker, retries=3):
                 return df
                 
         except Exception as e:
-            print(f"CoinGecko error {ticker}: {e}")
+            pass
     
     return None
 
@@ -203,11 +209,12 @@ def get_macro():
                 print(f"  ✓ SPY fetched (attempt {attempt + 1})")
                 break
             else:
-                print(f"  Retry {attempt + 1}/5...")
-                time.sleep(5)
+                if attempt < 4:
+                    print(f"  SPY retry {attempt + 1}/5...")
+                    time.sleep(5)
         
         if spy is None:
-            print("  WARNING: SPY unavailable, continuing without it")
+            print("  WARNING: SPY unavailable after 5 attempts")
         else:
             result['spy'] = spy['Close']
         

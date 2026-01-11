@@ -48,14 +48,10 @@ def calc_demark(df):
         if last > 10:
             if df['Buy_Setup'].iloc[-1] == 9:
                 lows = df['Low'].values
-                if (lows[last] < lows[last-2] and lows[last] < lows[last-3]) or \
-                   (lows[last-1] < lows[last-2] and lows[last-1] < lows[last-3]):
-                    perf = True
+                if (lows[last] < lows[last-2] and lows[last] < lows[last-3]) or (lows[last-1] < lows[last-2] and lows[last-1] < lows[last-3]): perf = True
             elif df['Sell_Setup'].iloc[-1] == 9:
                 highs = df['High'].values
-                if (highs[last] > highs[last-2] and highs[last] > highs[last-3]) or \
-                   (highs[last-1] > highs[last-2] and highs[last-1] > highs[last-3]):
-                    perf = True
+                if (highs[last] > highs[last-2] and highs[last] > highs[last-3]) or (highs[last-1] > highs[last-2] and highs[last-1] > highs[last-3]): perf = True
         df['Perfected'] = perf
         return df
     except:

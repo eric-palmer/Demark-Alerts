@@ -1,4 +1,4 @@
-# main.py - Institutional Engine (Robust Macro)
+# main.py - Institutional Engine (Detailed Portfolio Report)
 import time
 import pandas as pd
 import numpy as np
@@ -59,69 +59,105 @@ def analyze_ticker(ticker, regime):
         price = last['Close']
         sma_200 = df['Close'].rolling(200).mean().iloc[-1]
         if pd.isna(sma_200): sma_200 = price 
+        
         trend = "BULLISH" if price > sma_200 else "BEARISH"
         
         atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
         if pd.isna(atr): atr = price * 0.02
         
-        # Trade Logic
-        setup = {'active': False, 'msg': "None", 'target': 0, 'stop': 0, 'time': ''}
+        # --- SCORE & SIGNAL LOGIC ---
         score = 0
+        active_signal = None # Stores the "Headline" signal if any
         
-        # DeMark
-        if last.get('Buy_Setup') == 9:
+        # 1. DeMark
+        bs = last.get('Buy_Setup', 0); ss = last.get('Sell_Setup', 0)
+        dm_status = f"Buy {int(bs)}" if bs > ss else f"Sell {int(ss)}"
+        
+        if bs == 9:
             perf = last.get('Perfected')
             score += 3 if perf else 2
-            setup = {'active': True, 'msg': f"DeMark BUY 9 {'(Perfected)' if perf else ''}", 'target': price + (atr*3), 'stop': price - (atr*1.5), 'time': '1-4 Weeks'}
-        elif last.get('Sell_Setup') == 9:
+            dm_status = f"BUY 9 {'(Perfected)' if perf else '(Unperfected)'}"
+            active_signal = dm_status
+        elif ss == 9:
             perf = last.get('Perfected')
             score += 3 if perf else 2
-            setup = {'active': True, 'msg': f"DeMark SELL 9 {'(Perfected)' if perf else ''}", 'target': price - (atr*3), 'stop': price + (atr*1.5), 'time': '1-4 Weeks'}
+            dm_status = f"SELL 9 {'(Perfected)' if perf else '(Unperfected)'}"
+            active_signal = dm_status
             
-        # Squeeze
-        if sq_res and not setup['active']:
+        # 2. Squeeze
+        if sq_res:
             score += 2
-            d = sq_res['bias']
-            setup = {'active': True, 'msg': f"TTM Squeeze ({d})", 'target': price+(atr*4) if d=="BULLISH" else price-(atr*4), 'stop': price-(atr*2) if d=="BULLISH" else price+(atr*2), 'time': '3-10 Days'}
+            if not active_signal: active_signal = f"TTM Squeeze ({sq_res['bias']})"
             
-        # RSI
-        if last['RSI'] < 30: 
+        # 3. RSI
+        rsi_val = last['RSI']
+        if rsi_val < 30: 
             score += 2
-            if not setup['active']: setup = {'active': True, 'msg': "RSI Oversold", 'target': price+(atr*2), 'stop': price-atr, 'time': '1-3 Days'}
-        elif last['RSI'] > 70:
+            if not active_signal: active_signal = "RSI Oversold"
+        elif rsi_val > 70:
             score += 2
-            if not setup['active']: setup = {'active': True, 'msg': "RSI Overbought", 'target': price-(atr*2), 'stop': price+atr, 'time': '1-3 Days'}
-                
+            if not active_signal: active_signal = "RSI Overbought"
+            
         if shannon['breakout']: score += 3
-        if regime == 'RISK_OFF' and "BUY" in setup['msg']: score -= 1
+        if regime == 'RISK_OFF' and active_signal and "BUY" in active_signal: score -= 1
         
+        # --- TARGET CALCULATION (For Portfolio View) ---
+        # If no active signal, default to Trend Following Logic
+        if "BUY" in str(active_signal) or (not active_signal and trend == "BULLISH"):
+            target = price + (atr * 3)
+            stop = price - (atr * 1.5)
+            horizon = "1-3 Weeks"
+        else:
+            target = price - (atr * 3)
+            stop = price + (atr * 1.5)
+            horizon = "1-3 Weeks"
+            
         return {
             'ticker': ticker, 'price': price, 'trend': trend, 'score': score,
-            'setup': setup, 'squeeze': sq_res, 'shannon': shannon, 
-            'rsi': last['RSI'], 'adx': adx.iloc[-1]
+            'signal': active_signal, 'squeeze': sq_res, 'shannon': shannon, 
+            'rsi': rsi_val, 'adx': adx.iloc[-1], 'demark_status': dm_status,
+            'target': target, 'stop': stop, 'horizon': horizon
         }
     except: return None
 
-def format_alert(res):
-    s = res['setup']
+def format_portfolio_card(res):
+    """Detailed Card for Portfolio Holdings"""
     icon = "🟢" if res['trend'] == "BULLISH" else "🔴"
-    msg = f"{icon} *{res['ticker']}* @ {fmt_price(res['price'])}\n"
-    msg += f"Score: {res['score']}/10 | Trend: {res['trend']}\n"
     
-    if s['active']:
-        msg += f"🎯 *ACTION:* {s['msg']}\n"
-        msg += f"   • Target: {fmt_price(s['target'])}\n"
-        msg += f"   • Stop: {fmt_price(s['stop'])}\n"
-        msg += f"   • Horizon: {s['time']}\n"
-    elif res['ticker'] in CURRENT_PORTFOLIO:
-        msg += f"   • Status: No Signal\n"
-            
-    msg += f"   • RSI: {res['rsi']:.1f} | ADX: {res['adx']:.1f}\n"
-    if res['shannon']['breakout']: msg += f"   • Momentum: BREAKOUT 🚀\n"
+    msg = f"{icon} *{res['ticker']}* @ {fmt_price(res['price'])}\n"
+    msg += f"Score: {res['score']}/10 | ADX: {res['adx']:.1f} ({'Strong' if res['adx']>25 else 'Weak'})\n"
+    msg += f"────────────────\n"
+    
+    # Detailed Indicator Breakdown
+    msg += f"• **DeMark:** {res['demark_status']}\n"
+    
+    rsi_state = "Neutral"
+    if res['rsi'] > 70: rsi_state = "Overbought ⚠️"
+    elif res['rsi'] < 30: rsi_state = "Oversold 🛒"
+    msg += f"• **RSI:** {res['rsi']:.1f} ({rsi_state})\n"
+    
+    sq_txt = f"{res['squeeze']['bias']} (Firing)" if res['squeeze'] else "None"
+    msg += f"• **Squeeze:** {sq_txt}\n"
+    
+    if res['shannon']['breakout']:
+        msg += f"• **Momentum:** 🚀 BREAKOUT DETECTED\n"
+        
+    msg += f"────────────────\n"
+    msg += f"🎯 **Target:** {fmt_price(res['target'])}\n"
+    msg += f"🛑 **Stop:** {fmt_price(res['stop'])}\n"
+    msg += f"⏳ **Horizon:** {res['horizon']}\n"
+    
+    return msg + "\n"
+
+def format_scanner_alert(res):
+    """Brief Card for Scanner Hits"""
+    msg = f"🚨 *{res['ticker']}* ({res['score']}/10)\n"
+    msg += f"Signal: {res['signal']}\n"
+    msg += f"Target: {fmt_price(res['target'])} | Stop: {fmt_price(res['stop'])}\n"
     return msg + "\n"
 
 if __name__ == "__main__":
-    print("="*60); print("INSTITUTIONAL SCANNER"); print("="*60)
+    print("="*60); print("INSTITUTIONAL BATCH SCANNER"); print("="*60)
     
     full_list = list(set(CURRENT_PORTFOLIO + STRATEGIC_TICKERS))
     for t in CURRENT_PORTFOLIO:
@@ -133,26 +169,19 @@ if __name__ == "__main__":
     
     send_telegram(f"🏗️ *SCAN STARTED*\nAssets: {len(full_list)}\nBatches: {len(batches)}\nEst. Time: {est_time} mins")
 
-    # 2. Macro (Crash Proof)
+    # Macro
     regime = "NEUTRAL"
     try:
         macro = get_macro()
         if macro['net_liq'] is not None:
-            # Need series to calculate change, if scalar assume positive?
-            # Actually get_macro returns scalar for net_liq in last iteration?
-            # Let's check type. If float, we just check sign.
             nl = macro['net_liq']
             if isinstance(nl, pd.Series):
                 if nl.pct_change(63).iloc[-1] > 0: regime = "RISK_ON"
                 else: regime = "RISK_OFF"
-            elif isinstance(nl, (float, int)):
-                regime = "RISK_ON" # Fallback if we just got a number
-    except Exception as e:
-        print(f"Macro Warning: {e}")
-
+    except: pass
     send_telegram(f"📊 *REGIME: {regime}*")
 
-    # 3. Execution
+    # Execution
     all_results = []
     
     for i, batch in enumerate(batches):
@@ -163,27 +192,30 @@ if __name__ == "__main__":
                 res = future.result()
                 if res: all_results.append(res)
 
+        # IMMEDIATE REPORT: Portfolio (Detailed View)
         if i == 0:
-            port_msg = "💼 *PORTFOLIO UPDATE*\n\n"
+            port_msg = "💼 *PORTFOLIO DEEP DIVE*\n\n"
             found_port = False
             for r in all_results:
                 if r['ticker'] in CURRENT_PORTFOLIO:
                     found_port = True
-                    port_msg += format_alert(r)
+                    port_msg += format_portfolio_card(r)
             if found_port: send_telegram(port_msg)
 
         if i < len(batches) - 1:
             print(f"Sleeping {SLEEP_TIME}s..."); time.sleep(SLEEP_TIME)
 
-    # 4. Final
+    # Final Report
+    print("Generating Final Report...")
     scan_msg = "🚨 *HIGH CONVICTION OPPORTUNITIES*\n\n"
     all_results.sort(key=lambda x: x['score'], reverse=True)
     
     found_opp = False
     for r in all_results:
+        # Show High Scores NOT in portfolio
         if r['ticker'] not in CURRENT_PORTFOLIO and r['score'] >= 4:
             found_opp = True
-            scan_msg += format_alert(r)
+            scan_msg += format_scanner_alert(r)
             
     if found_opp:
         if len(scan_msg) > 4000:

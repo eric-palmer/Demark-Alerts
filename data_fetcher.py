@@ -1,31 +1,31 @@
-# data_fetcher.py - Institutional Batch Fetcher
+# data_fetcher.py - Institutional Router (Fresh Sessions)
 import pandas as pd
-import requests
 import time
 import os
 import yfinance as yf
 from tiingo import TiingoClient
 
 # --- Configuration ---
-# Safety buffer: We request 40 tickers per hour to be safe under the 50 limit
-BATCH_SIZE = 40  
+# We handle batching in main.py, this is just the fetcher
+PAUSE_SEC = 0.2
 
 def get_tiingo_client():
+    """Create a fresh client every time to prevent timeouts"""
     api_key = os.environ.get('TIINGO_API_KEY')
     return TiingoClient({'api_key': api_key, 'session': True}) if api_key else None
 
 def fetch_tiingo(ticker, client):
-    """Primary Institutional Source"""
+    """Institutional Source: Tiingo"""
     try:
-        # Tiingo logic: Check if crypto or stock
+        # 1. Crypto Handling (btcusd)
         if '-USD' in ticker:
-            # Crypto: 'BTC-USD' -> 'btcusd'
             sym = ticker.replace('-USD', '').lower() + 'usd'
             data = client.get_crypto_price_history(tickers=[sym], startDate='2022-01-01', resampleFreq='1day')
             df = pd.DataFrame(data[0].get('priceData', []))
             rename = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
+        
+        # 2. Stock Handling
         else:
-            # Stock
             df = client.get_dataframe(ticker, metric_name='adjClose', startDate='2022-01-01')
             rename = {'adjOpen': 'Open', 'adjHigh': 'High', 'adjLow': 'Low', 'adjClose': 'Close', 'adjVolume': 'Volume',
                       'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
@@ -37,45 +37,57 @@ def fetch_tiingo(ticker, client):
         return None
 
 def fetch_fallback(ticker):
-    """Backup for Meme Coins not on Tiingo"""
+    """Backup Source: Yahoo (Nuclear Flat)"""
     try:
-        # Try Yahoo "Nuclear" Flat method
         dat = yf.Ticker(ticker)
         df = dat.history(period="2y", auto_adjust=True)
         if df.empty: return None
+        
         df = df.reset_index()
         df.columns = [c.lower() for c in df.columns]
         rename = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
         df = df.rename(columns=rename)
+        
         if 'Date' in df.columns:
             df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
             df = df.set_index('Date')
-        return df
-    except: return None
-
-def safe_download(ticker, client=None):
-    """Smart Router: Tiingo -> Fallback"""
-    df = None
-    if client:
-        df = fetch_tiingo(ticker, client)
-    
-    if df is None or len(df) < 5:
-        # Tiingo missed it (likely a new meme coin), use backup
-        df = fetch_fallback(ticker)
-        
-    # Validation
-    if df is not None:
+            
         # Force numeric
         for c in ['Open', 'High', 'Low', 'Close']:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors='coerce')
-        df = df.ffill().dropna()
-        if len(df) > 30: return df
+        return df
+    except: return None
+
+def safe_download(ticker):
+    """
+    Smart Router: 
+    1. Try Tiingo (Fresh Client)
+    2. Fallback to Yahoo if Tiingo empty
+    """
+    client = get_tiingo_client()
+    df = None
+    
+    # Priority: Tiingo
+    if client:
+        time.sleep(PAUSE_SEC)
+        df = fetch_tiingo(ticker, client)
+    
+    # Fallback: Yahoo
+    if df is None or len(df) < 5:
+        df = fetch_fallback(ticker)
         
+    # Validation & Liquidity Check
+    if df is not None:
+        df = df.ffill().dropna()
+        if len(df) > 30:
+            return df
+            
     return None
 
 def get_macro():
-    """Get Context without wasting Tiingo credits"""
+    """Context Fetcher (Manual Request)"""
+    # Use fallback for SPY to save Tiingo credits
     spy = fetch_fallback('SPY')
     api_key = os.environ.get('FRED_API_KEY')
     result = {'net_liq': None, 'spy': None}
@@ -85,8 +97,9 @@ def get_macro():
     if api_key:
         try:
             url = "https://api.stlouisfed.org/fred/series/observations"
+            import requests # Import here to keep scope clean
             def get(sid):
-                r = requests.get(url, params={'series_id': sid, 'api_key': api_key, 'file_type': 'json'})
+                r = requests.get(url, params={'series_id': sid, 'api_key': api_key, 'file_type': 'json'}, timeout=10)
                 df = pd.DataFrame(r.json()['observations'])
                 return pd.to_numeric(df['value'], errors='coerce')
             

@@ -1,55 +1,67 @@
-# main.py - Institutional Strategy Engine (Batch Mode)
+# main.py - Institutional Batch Engine (Secure)
 import time
-import math
+import json
+import os
 import pandas as pd
-import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from data_fetcher import safe_download, get_macro, get_tiingo_client
+from data_fetcher import safe_download, get_macro
 from indicators import calc_rsi, calc_squeeze, calc_demark, calc_shannon, calc_adx
 from utils import send_telegram, fmt_price
 
-# --- YOUR UNIVERSE ---
+# --- CONFIGURATION ---
+BATCH_SIZE = 40        # Safety limit for Tiingo (50/hr)
+SLEEP_TIME = 3660      # 61 minutes
+MAX_WORKERS = 1        # Serial processing
+
+# --- ASSETS ---
 CURRENT_PORTFOLIO = ['SLV', 'DJT']
 
 STRATEGIC_TICKERS = [
-    # Meme / Crypto Proxies
-    'PENGU-USD', 'FARTCOIN-USD', 'DOGE-USD', 'SHIB-USD', 'PEPE-USD', 'TRUMP-USD',
+    # Meme / PolitiFi
+    'DJT', 'PENGU-USD', 'FARTCOIN-USD', 'DOGE-USD', 'SHIB-USD', 'PEPE-USD', 'TRUMP-USD',
+    # Crypto Majors & Miners
     'BTC-USD', 'ETH-USD', 'SOL-USD', 'BTDR', 'MARA', 'RIOT', 'HUT', 'CLSK', 
     'IREN', 'CIFR', 'BTBT', 'WYFI', 'CORZ', 'CRWV', 'APLD', 'NBIS', 'WULF', 
     'HIVE', 'BITF', 'WGMI', 'MNRS', 'OWNB', 'BMNR', 'SBET', 'FWDI', 'BKKT',
+    # Crypto ETFs
     'IBIT', 'ETHA', 'BITQ', 'BSOL', 'GSOL', 'SOLT', 'MSTR', 'COIN', 'HOOD', 
     'GLXY', 'STKE', 'DFDV', 'NODE', 'GEMI', 'BLSH', 'CRCL',
-    # Commodities / Energy
-    'GLD', 'SLV', 'PALL', 'PPLT', 'NIKL', 'LIT', 'ILIT', 'REMX', 'VOLT', 'GRID', 
-    'EQT', 'TAC', 'BE', 'OKLO', 'SMR', 'NEE', 'URA', 'SRUUF', 'CCJ', 'KAMJY', 'UNL',
-    # Tech / Mag 7 / Growth
+    # Commodities
+    'GC=F', 'SI=F', 'CL=F', 'NG=F', 'HG=F', 'PL=F', 'PA=F', 'GLD', 'SLV', 
+    'PALL', 'PPLT', 'NIKL', 'LIT', 'ILIT', 'REMX',
+    # Energy / Grid
+    'VOLT', 'GRID', 'EQT', 'TAC', 'BE', 'OKLO', 'SMR', 'NEE', 'URA', 'SRUUF', 
+    'CCJ', 'KAMJY', 'UNL',
+    # Tech / Mag 7
     'NVDA', 'SMH', 'SMHX', 'TSM', 'AVGO', 'QCOM', 'MU', 'AMD', 'TER', 'NOW', 
     'AXON', 'SNOW', 'PLTR', 'GOOG', 'MSFT', 'META', 'AMZN', 'AAPL', 'TSLA', 
     'NFLX', 'SPOT', 'SHOP', 'UBER', 'DASH', 'NET', 'DXCM', 'ETSY', 'SQ', 
     'FIG', 'MAGS', 'MTUM', 'IVES', 'ARKK', 'ARKF', 'ARKG', 'GRNY', 'GRNI', 
     'GRNJ', 'XBI', 'XHB',
-    # Sectors / Intl
+    # Sectors
     'XLK', 'XLI', 'XLU', 'XLRE', 'XLB', 'XLV', 'XLF', 'XLE', 'XLP', 'XLY', 
-    'XLC', 'BABA', 'JD', 'BIDU', 'PDD', 'XIACY', 'BYDDY', 'LKNCY', 'TCEHY', 
-    'MCHI', 'INDA', 'EWZ', 'EWJ', 'EWG', 'EWU', 'EWY', 'EWW', 'EWT', 'EWC', 
-    'EEM', 'AMX', 'PBR', 'VALE', 'NSRGY', 'DEO',
-    # Financials / Other
+    'XLC',
+    # International
+    'BABA', 'JD', 'BIDU', 'PDD', 'XIACY', 'BYDDY', 'LKNCY', 'TCEHY', 'MCHI', 
+    'INDA', 'EWZ', 'EWJ', 'EWG', 'EWU', 'EWY', 'EWW', 'EWT', 'EWC', 'EEM', 
+    'AMX', 'PBR', 'VALE', 'NSRGY', 'DEO',
+    # Financials
     'BLK', 'STT', 'ARES', 'SOFI', 'PYPL', 'IBKR', 'WU', 'RXRX', 'SDGR', 
     'TEM', 'ABSI', 'DNA', 'TWST', 'GLW', 'KHC', 'LULU', 'YETI', 'DLR', 
     'EQIX', 'ORCL', 'LSF'
 ]
 
-# --- Config ---
-BATCH_SIZE = 40        # Stay safely under 50/hr limit
-SLEEP_TIME = 3660      # 61 minutes
-MAX_WORKERS = 1        # Serial processing to be gentle on API
-
-def analyze_ticker(ticker, client, regime):
+def analyze_ticker(ticker, regime):
     try:
-        df = safe_download(ticker, client)
+        df = safe_download(ticker)
         if df is None: return None
 
+        # Liquidity Check (Skip illiquid junk, except crypto)
+        last_vol = df['Volume'].iloc[-5:].mean() * df['Close'].iloc[-1]
+        if last_vol < 500000 and '-USD' not in ticker: return None 
+
+        # Indicators
         df['RSI'] = calc_rsi(df['Close'])
         df = calc_demark(df)
         sq_res = calc_squeeze(df)
@@ -59,42 +71,54 @@ def analyze_ticker(ticker, client, regime):
         last = df.iloc[-1]
         price = last['Close']
         sma_200 = df['Close'].rolling(200).mean().iloc[-1]
-        
-        # Trend Context
         if pd.isna(sma_200): sma_200 = price 
         trend = "BULLISH" if price > sma_200 else "BEARISH"
         
-        # Signal Verdict
-        verdict = "WAIT"
-        score = 0
-        setup = None
+        atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
+        if pd.isna(atr): atr = price * 0.02
         
-        # DeMark Logic
+        # --- TRADE CARD ---
+        setup = {'active': False, 'msg': "None", 'target': 0, 'stop': 0, 'time': ''}
+        score = 0
+        
+        # 1. DeMark (Primary)
         if last.get('Buy_Setup') == 9:
             perf = last.get('Perfected')
-            setup = {'type': 'BUY', 'perf': perf, 'count': 9}
             score += 3 if perf else 2
+            setup = {
+                'active': True, 'msg': f"DeMark BUY 9 {'(Perfected)' if perf else ''}",
+                'target': price + (atr * 3), 'stop': price - (atr * 1.5), 'time': '1-4 Weeks'
+            }
         elif last.get('Sell_Setup') == 9:
             perf = last.get('Perfected')
-            setup = {'type': 'SELL', 'perf': perf, 'count': 9}
             score += 3 if perf else 2
-        else:
-            # Show raw counts for portfolio
-            bs = last.get('Buy_Setup', 0); ss = last.get('Sell_Setup', 0)
-            cnt = f"Buy {int(bs)}" if bs > ss else f"Sell {int(ss)}"
-            setup = {'type': 'COUNT', 'perf': False, 'count': cnt}
-
-        # Confluence
-        if last['RSI'] < 30: score += 2
-        if last['RSI'] > 70: score += 2
-        if sq_res: score += 2
+            setup = {
+                'active': True, 'msg': f"DeMark SELL 9 {'(Perfected)' if perf else ''}",
+                'target': price - (atr * 3), 'stop': price + (atr * 1.5), 'time': '1-4 Weeks'
+            }
+            
+        # 2. Squeeze
+        if sq_res and not setup['active']:
+            score += 2
+            d = sq_res['bias']
+            setup = {
+                'active': True, 'msg': f"TTM Squeeze ({d})",
+                'target': price + (atr * 4) if d == "BULLISH" else price - (atr * 4),
+                'stop': price - (atr * 2) if d == "BULLISH" else price + (atr * 2), 'time': '3-10 Days'
+            }
+            
+        # 3. RSI Extremes
+        if last['RSI'] < 30: 
+            score += 2
+            if not setup['active']:
+                setup = {'active': True, 'msg': "RSI Oversold", 'target': price+(atr*2), 'stop': price-atr, 'time': '1-3 Days'}
+        elif last['RSI'] > 70:
+            score += 2
+            if not setup['active']:
+                setup = {'active': True, 'msg': "RSI Overbought", 'target': price-(atr*2), 'stop': price+atr, 'time': '1-3 Days'}
+                
         if shannon['breakout']: score += 3
-        
-        # Macro Filter
-        if regime == 'RISK_OFF' and setup['type'] == 'BUY': score -= 1
-        
-        # Text Verdict
-        if score >= 4: verdict = "ACTION"
+        if regime == 'RISK_OFF' and "BUY" in setup['msg']: score -= 1
         
         return {
             'ticker': ticker, 'price': price, 'trend': trend, 'score': score,
@@ -103,116 +127,88 @@ def analyze_ticker(ticker, client, regime):
         }
     except: return None
 
-def format_portfolio(res):
+def format_alert(res):
     s = res['setup']
     icon = "🟢" if res['trend'] == "BULLISH" else "🔴"
-    
     msg = f"{icon} *{res['ticker']}* @ {fmt_price(res['price'])}\n"
+    msg += f"Score: {res['score']}/10 | Trend: {res['trend']}\n"
     
-    # DeMark Detail
-    if s['type'] in ['BUY', 'SELL']:
-        perf_icon = "⭐ PERFECTED" if s['perf'] else "⚪ Imperfected"
-        msg += f"   • DeMark: {s['type']} 9 ({perf_icon})\n"
-    else:
-        msg += f"   • DeMark: {s['count']}\n"
-        
-    msg += f"   • Trend: {res['trend']} (ADX: {res['adx']:.1f})\n"
-    msg += f"   • RSI: {res['rsi']:.1f}\n"
-    
-    if res['squeeze']: 
-        msg += f"   • Squeeze: {res['squeeze']['bias']} Ready ⚠️\n"
-    if res['shannon']['breakout']:
-        msg += f"   • Momentum: BREAKOUT 🚀\n"
-        
-    return msg + "\n"
-
-def format_scanner(res):
-    # Only show if meaningful
-    s = res['setup']
-    msg = f"*{res['ticker']}* ({res['score']}/10)\n"
-    
-    if s['type'] in ['BUY', 'SELL']:
-        perf = "⭐" if s['perf'] else "(Imperfect)"
-        msg += f"   • {s['type']} 9 {perf}\n"
-        
-    if res['shannon']['breakout']:
-        msg += f"   • Momentum Breakout 🚀\n"
-        
-    if res['squeeze']:
-        msg += f"   • {res['squeeze']['bias']} Squeeze\n"
-        
+    if s['active']:
+        msg += f"🎯 *ACTION:* {s['msg']}\n"
+        msg += f"   • Target: {fmt_price(s['target'])}\n"
+        msg += f"   • Stop: {fmt_price(s['stop'])}\n"
+        msg += f"   • Horizon: {s['time']}\n"
+    elif res['ticker'] in CURRENT_PORTFOLIO:
+        msg += f"   • Status: No Signal\n"
+            
+    msg += f"   • RSI: {res['rsi']:.1f} | ADX: {res['adx']:.1f}\n"
+    if res['shannon']['breakout']: msg += f"   • Momentum: BREAKOUT 🚀\n"
     return msg + "\n"
 
 if __name__ == "__main__":
-    print("="*60)
-    print("INSTITUTIONAL BATCH SCANNER")
-    print("="*60)
+    print("="*60); print("INSTITUTIONAL BATCH SCANNER"); print("="*60)
     
-    # 1. Init
-    client = get_tiingo_client()
+    # 1. Organization
     full_list = list(set(CURRENT_PORTFOLIO + STRATEGIC_TICKERS))
-    
-    # Prioritize Portfolio
-    # Put portfolio items at the front of the list so they scan first
+    # Move Portfolio to front
     for t in CURRENT_PORTFOLIO:
         if t in full_list: full_list.remove(t)
     full_list = CURRENT_PORTFOLIO + full_list
     
-    # Batching logic
     batches = [full_list[i:i + BATCH_SIZE] for i in range(0, len(full_list), BATCH_SIZE)]
     est_time = (len(batches) - 1) * 61
     
-    send_telegram(f"🏗️ *SCANNING STARTED*\nTargets: {len(full_list)}\nBatches: {len(batches)}\nEst. Time: {est_time} mins")
+    send_telegram(f"🏗️ *SCAN STARTED*\nAssets: {len(full_list)}\nBatches: {len(batches)}\nEst. Time: {est_time} mins")
 
     # 2. Macro
     macro = get_macro()
     regime = "NEUTRAL"
     if macro['net_liq'] and macro['net_liq'] > 0: regime = "RISK_ON"
 
-    # 3. Execution Loop
+    # 3. Execution
     all_results = []
     
     for i, batch in enumerate(batches):
         print(f"Processing Batch {i+1}/{len(batches)}...")
         
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_map = {executor.submit(analyze_ticker, t, client, regime): t for t in batch}
+            future_map = {executor.submit(analyze_ticker, t, regime): t for t in batch}
             for future in as_completed(future_map):
                 res = future.result()
                 if res: all_results.append(res)
-        
-        # Sleep if not last batch
-        if i < len(batches) - 1:
-            print(f"Sleeping {SLEEP_TIME}s...")
-            time.sleep(SLEEP_TIME)
 
-    # 4. Final Reporting
-    print("Generating Report...")
+        # IMMEDIATE REPORT: Send Portfolio updates ASAP (don't make user wait)
+        if i == 0:
+            port_msg = "💼 *PORTFOLIO UPDATE*\n\n"
+            found_port = False
+            for r in all_results:
+                if r['ticker'] in CURRENT_PORTFOLIO:
+                    found_port = True
+                    port_msg += format_alert(r)
+            if found_port: send_telegram(port_msg)
+
+        if i < len(batches) - 1:
+            print(f"Sleeping {SLEEP_TIME}s..."); time.sleep(SLEEP_TIME)
+
+    # 4. Final Scanner Report
+    print("Generating Final Report...")
+    scan_msg = "🚨 *HIGH CONVICTION OPPORTUNITIES*\n\n"
+    all_results.sort(key=lambda x: x['score'], reverse=True)
     
-    # Portfolio Report (Detailed)
-    port_msg = "💼 *PORTFOLIO REPORT*\n\n"
+    found_opp = False
     for r in all_results:
-        if r['ticker'] in CURRENT_PORTFOLIO:
-            port_msg += format_portfolio(r)
-    send_telegram(port_msg)
-    
-    # Power Rankings (Scanner)
-    # Filter for Score >= 4 OR DeMark 9s
-    power_picks = [r for r in all_results 
-                   if r['score'] >= 4 
-                   or r['setup']['type'] in ['BUY', 'SELL']]
-                   
-    power_picks.sort(key=lambda x: x['score'], reverse=True)
-    
-    if power_picks:
-        # Split into chunks
-        chunks = [power_picks[i:i + 10] for i in range(0, len(power_picks), 10)]
-        for chunk in chunks:
-            scan_msg = "🚨 *POWER RANKINGS*\n\n"
-            for r in chunk:
-                scan_msg += format_scanner(r)
+        # Only show High Score signals that aren't already reported in portfolio
+        if r['ticker'] not in CURRENT_PORTFOLIO and r['score'] >= 4:
+            found_opp = True
+            scan_msg += format_alert(r)
+            
+    if found_opp:
+        if len(scan_msg) > 4000:
+            parts = [scan_msg[i:i+4000] for i in range(0, len(scan_msg), 4000)]
+            for p in parts: send_telegram(p)
+        else:
             send_telegram(scan_msg)
     else:
-        send_telegram("✅ No high-conviction setups found.")
+        send_telegram("✅ Scan Complete. No other setups found.")
         
     print("DONE")

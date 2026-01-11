@@ -1,11 +1,10 @@
-# main.py - Institutional Batch Engine (Secure)
+# main.py - Institutional Batch Engine (Full Universe)
 import time
-import json
-import os
 import pandas as pd
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from data_fetcher import safe_download, get_macro
+from data_fetcher import safe_download, get_macro, get_tiingo_client
 from indicators import calc_rsi, calc_squeeze, calc_demark, calc_shannon, calc_adx
 from utils import send_telegram, fmt_price
 
@@ -18,48 +17,65 @@ MAX_WORKERS = 1        # Serial processing
 CURRENT_PORTFOLIO = ['SLV', 'DJT']
 
 STRATEGIC_TICKERS = [
-    # Meme / PolitiFi
-    'DJT', 'PENGU-USD', 'FARTCOIN-USD', 'DOGE-USD', 'SHIB-USD', 'PEPE-USD', 'TRUMP-USD',
-    # Crypto Majors & Miners
-    'BTC-USD', 'ETH-USD', 'SOL-USD', 'BTDR', 'MARA', 'RIOT', 'HUT', 'CLSK', 
-    'IREN', 'CIFR', 'BTBT', 'WYFI', 'CORZ', 'CRWV', 'APLD', 'NBIS', 'WULF', 
-    'HIVE', 'BITF', 'WGMI', 'MNRS', 'OWNB', 'BMNR', 'SBET', 'FWDI', 'BKKT',
-    # Crypto ETFs
-    'IBIT', 'ETHA', 'BITQ', 'BSOL', 'GSOL', 'SOLT', 'MSTR', 'COIN', 'HOOD', 
-    'GLXY', 'STKE', 'DFDV', 'NODE', 'GEMI', 'BLSH', 'CRCL',
-    # Commodities
-    'GC=F', 'SI=F', 'CL=F', 'NG=F', 'HG=F', 'PL=F', 'PA=F', 'GLD', 'SLV', 
-    'PALL', 'PPLT', 'NIKL', 'LIT', 'ILIT', 'REMX',
-    # Energy / Grid
-    'VOLT', 'GRID', 'EQT', 'TAC', 'BE', 'OKLO', 'SMR', 'NEE', 'URA', 'SRUUF', 
-    'CCJ', 'KAMJY', 'UNL',
-    # Tech / Mag 7
-    'NVDA', 'SMH', 'SMHX', 'TSM', 'AVGO', 'QCOM', 'MU', 'AMD', 'TER', 'NOW', 
-    'AXON', 'SNOW', 'PLTR', 'GOOG', 'MSFT', 'META', 'AMZN', 'AAPL', 'TSLA', 
-    'NFLX', 'SPOT', 'SHOP', 'UBER', 'DASH', 'NET', 'DXCM', 'ETSY', 'SQ', 
-    'FIG', 'MAGS', 'MTUM', 'IVES', 'ARKK', 'ARKF', 'ARKG', 'GRNY', 'GRNI', 
-    'GRNJ', 'XBI', 'XHB',
-    # Sectors
-    'XLK', 'XLI', 'XLU', 'XLRE', 'XLB', 'XLV', 'XLF', 'XLE', 'XLP', 'XLY', 
-    'XLC',
-    # International
-    'BABA', 'JD', 'BIDU', 'PDD', 'XIACY', 'BYDDY', 'LKNCY', 'TCEHY', 'MCHI', 
-    'INDA', 'EWZ', 'EWJ', 'EWG', 'EWU', 'EWY', 'EWW', 'EWT', 'EWC', 'EEM', 
+    # -- Meme / PolitiFi --
+    'PENGU-USD', 'FARTCOIN-USD', 'DOGE-USD', 'SHIB-USD', 'PEPE-USD', 'TRUMP-USD',
+    
+    # -- Crypto: Majors --
+    'BTC-USD', 'ETH-USD', 'SOL-USD',
+    
+    # -- Crypto: Miners & Infrastructure --
+    'BTDR', 'MARA', 'RIOT', 'HUT', 'CLSK', 'IREN', 'CIFR', 'BTBT',
+    'WYFI', 'CORZ', 'CRWV', 'APLD', 'NBIS', 'WULF', 'HIVE', 'BITF',
+    'WGMI', 'MNRS', 'OWNB', 'BMNR', 'SBET', 'FWDI', 'BKKT',
+    
+    # -- Crypto: ETFs & Proxies --
+    'IBIT', 'ETHA', 'BITQ', 'BSOL', 'GSOL', 'SOLT',
+    'MSTR', 'COIN', 'HOOD', 'GLXY', 'STKE', 'DFDV', 'NODE', 'GEMI', 'BLSH',
+    'CRCL',
+    
+    # -- Commodities --
+    'GC=F', 'SI=F', 'CL=F', 'NG=F', 'HG=F', 'PL=F', 'PA=F',
+    'GLD', 'SLV', 'PALL', 'PPLT', 'NIKL', 'LIT', 'ILIT', 'REMX',
+    
+    # -- Energy / Grid / Uranium --
+    'VOLT', 'GRID', 'EQT', 'TAC', 'BE', 'OKLO', 'SMR', 'NEE', 
+    'URA', 'SRUUF', 'CCJ', 'KAMJY', 'UNL',
+    
+    # -- Tech / AI / Mag 7 --
+    'NVDA', 'SMH', 'SMHX', 'TSM', 'AVGO', 'QCOM', 'MU', 'AMD', 'TER', 
+    'NOW', 'AXON', 'SNOW', 'PLTR', 'GOOG', 'MSFT', 'META', 'AMZN', 'AAPL',
+    'TSLA', 'NFLX', 'SPOT', 'SHOP', 'UBER', 'DASH', 'NET', 'DXCM', 'ETSY',
+    'SQ', 'FIG', 'MAGS', 'MTUM', 'IVES',
+    
+    # -- Innovation --
+    'ARKK', 'ARKF', 'ARKG', 'GRNY', 'GRNI', 'GRNJ', 'XBI', 'XHB',
+    
+    # -- Sectors --
+    'XLK', 'XLI', 'XLU', 'XLRE', 'XLB', 'XLV', 'XLF', 'XLE', 'XLP', 'XLY', 'XLC',
+    
+    # -- International --
+    'BABA', 'JD', 'BIDU', 'PDD', 'XIACY', 'BYDDY', 'LKNCY', 'TCEHY',
+    'MCHI', 'INDA', 'EWZ', 'EWJ', 'EWG', 'EWU', 'EWY', 'EWW', 'EWT', 'EWC', 'EEM',
     'AMX', 'PBR', 'VALE', 'NSRGY', 'DEO',
-    # Financials
-    'BLK', 'STT', 'ARES', 'SOFI', 'PYPL', 'IBKR', 'WU', 'RXRX', 'SDGR', 
-    'TEM', 'ABSI', 'DNA', 'TWST', 'GLW', 'KHC', 'LULU', 'YETI', 'DLR', 
-    'EQIX', 'ORCL', 'LSF'
+    
+    # -- Financials / Other --
+    'BLK', 'STT', 'ARES', 'SOFI', 'PYPL', 'IBKR', 'WU',
+    'RXRX', 'SDGR', 'TEM', 'ABSI', 'DNA', 'TWST', 'GLW', 
+    'KHC', 'LULU', 'YETI', 'DLR', 'EQIX', 'ORCL', 'LSF'
 ]
 
 def analyze_ticker(ticker, regime):
     try:
-        df = safe_download(ticker)
+        # Create fresh client for every batch to avoid stale sessions
+        client = get_tiingo_client()
+        df = safe_download(ticker, client)
         if df is None: return None
 
-        # Liquidity Check (Skip illiquid junk, except crypto)
-        last_vol = df['Volume'].iloc[-5:].mean() * df['Close'].iloc[-1]
-        if last_vol < 500000 and '-USD' not in ticker: return None 
+        # Liquidity Check (Skip <$500k volume unless it's a major index/crypto)
+        # Exception for Futures (=F) which sometimes report volume differently
+        if '=F' not in ticker:
+            last_vol = df['Volume'].iloc[-5:].mean() * df['Close'].iloc[-1]
+            if last_vol < 500000 and '-USD' not in ticker: return None 
 
         # Indicators
         df['RSI'] = calc_rsi(df['Close'])
@@ -177,7 +193,7 @@ if __name__ == "__main__":
                 res = future.result()
                 if res: all_results.append(res)
 
-        # IMMEDIATE REPORT: Send Portfolio updates ASAP (don't make user wait)
+        # IMMEDIATE REPORT: Send Portfolio updates ASAP
         if i == 0:
             port_msg = "💼 *PORTFOLIO UPDATE*\n\n"
             found_port = False
@@ -197,7 +213,6 @@ if __name__ == "__main__":
     
     found_opp = False
     for r in all_results:
-        # Only show High Score signals that aren't already reported in portfolio
         if r['ticker'] not in CURRENT_PORTFOLIO and r['score'] >= 4:
             found_opp = True
             scan_msg += format_alert(r)

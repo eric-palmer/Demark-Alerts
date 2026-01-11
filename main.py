@@ -1,4 +1,4 @@
-# main.py - Institutional Engine (Crash Safe)
+# main.py - Institutional Engine (Crash Safe & Verbose)
 import os
 import sqlite3
 import datetime
@@ -14,7 +14,7 @@ from utils import send_telegram, fmt_price
 
 # --- Configuration ---
 DB_FILE = "trading_state.db"
-MAX_WORKERS = 6 
+MAX_WORKERS = 5 # Safe limit for yfinance
 
 # --- Ticker Universe ---
 CURRENT_PORTFOLIO = ['SLV', 'DJT']
@@ -35,7 +35,7 @@ STRATEGIC_TICKERS = [
     'DLR', 'EQIX', 'ORCL', 'LSF'
 ]
 
-# --- Database & State Management ---
+# --- Database ---
 
 def init_db():
     with sqlite3.connect(DB_FILE) as conn:
@@ -63,14 +63,14 @@ def log_scan(ticker, status="OK"):
             (ticker, today, status)
         )
 
-# --- Analytic Logic ---
+# --- Analysis ---
 
 def analyze_ticker(ticker, macro_regime=None):
     try:
         df = safe_download(ticker)
         if df is None: return None
 
-        # 1. Calculate Indicators
+        # 1. Indicators
         df['RSI'] = calc_rsi(df['Close'])
         df = calc_demark(df)
         sq_res = calc_squeeze(df)
@@ -82,6 +82,8 @@ def analyze_ticker(ticker, macro_regime=None):
         price = last['Close']
         
         sma_200 = df['Close'].rolling(200).mean().iloc[-1]
+        if pd.isna(sma_200): sma_200 = price # Fallback if not enough data
+        
         trend = "BULLISH" if price > sma_200 else "BEARISH"
         
         signals = {
@@ -90,7 +92,7 @@ def analyze_ticker(ticker, macro_regime=None):
             'trend': trend,
             'score': 0,
             'setup': None,
-            'demark_count': 0,
+            'demark_count': "Neutral", # Default
             'squeeze': sq_res,
             'rsi': last['RSI'],
             'shannon': shannon,
@@ -100,22 +102,23 @@ def analyze_ticker(ticker, macro_regime=None):
         # --- Scoring ---
         score = 0
         
-        # DeMark
+        # DeMark Logic
         buy_seq = last.get('Buy_Setup', 0)
         sell_seq = last.get('Sell_Setup', 0)
         
-        if buy_seq >= 1:
+        # Always record the count for display
+        if buy_seq > 0:
             signals['demark_count'] = f"Buy {int(buy_seq)}"
             if buy_seq == 9:
                 signals['setup'] = {'type': 'BUY', 'perfected': last.get('Perfected', False)}
                 score += 3 if last.get('Perfected', False) else 2
-        elif sell_seq >= 1:
+        elif sell_seq > 0:
             signals['demark_count'] = f"Sell {int(sell_seq)}"
             if sell_seq == 9:
                 signals['setup'] = {'type': 'SELL', 'perfected': last.get('Perfected', False)}
                 score += 3 if last.get('Perfected', False) else 2
-            
-        # Indicators
+        
+        # Other Indicators
         if last['RSI'] < 30: score += 2
         if last['RSI'] > 70: score += 2
         if sq_res: score += 2
@@ -131,7 +134,7 @@ def analyze_ticker(ticker, macro_regime=None):
         return signals
 
     except Exception as e:
-        print(f"Error analyzing {ticker}: {e}")
+        # print(f"Error {ticker}: {e}") # Silence individual errors to keep logs clean
         return None
 
 def format_alert(s, is_portfolio=False):
@@ -139,24 +142,35 @@ def format_alert(s, is_portfolio=False):
     msg = f"{icon} *{s['ticker']}* @ {fmt_price(s['price'])}\n"
     msg += f"Score: {s['score']}/10\n"
     
+    # DeMark: Show setup if exists, otherwise show raw count for portfolio
     if s['setup']:
         p_mark = "⭐" if s['setup']['perfected'] else "○"
         msg += f"• DeMark: {s['setup']['type']} 9 {p_mark}\n"
-    elif is_portfolio and s['demark_count']:
+    elif is_portfolio:
         msg += f"• DeMark: {s['demark_count']}\n"
             
     if s['squeeze']:
         msg += f"• Squeeze: {s['squeeze']['bias']} Ready\n"
+    elif is_portfolio:
+        msg += f"• Squeeze: None\n"
             
     if s['shannon']['breakout']:
         msg += f"• Momentum: BREAKOUT 🚀\n"
     
+    # Force float conversion to handle any remaining weirdness
+    try:
+        rsi_val = float(s['rsi'])
+        adx_val = float(s['adx'])
+    except:
+        rsi_val = 0.0
+        adx_val = 0.0
+
     if is_portfolio:
-        msg += f"• RSI: {s['rsi']:.1f}\n"
-        msg += f"• ADX: {s['adx']:.1f}\n"
+        msg += f"• RSI: {rsi_val:.1f}\n"
+        msg += f"• ADX: {adx_val:.1f}\n"
     else:
-        if s['rsi'] < 30 or s['rsi'] > 70:
-            msg += f"• RSI: {s['rsi']:.1f}\n"
+        if rsi_val < 30 or rsi_val > 70:
+            msg += f"• RSI: {rsi_val:.1f}\n"
 
     return msg + "\n"
 
@@ -174,15 +188,18 @@ if __name__ == "__main__":
     regime = "NEUTRAL"
     liq_msg = "UNKNOWN"
     
-    # CRASH PROTECTION: Check if net_liq exists before math
-    if macro and macro.get('net_liq') is not None:
-        try:
-            liq_chg = macro['net_liq'].pct_change(63).iloc[-1]
-            regime = "RISK_ON" if liq_chg > 0 else "RISK_OFF"
-            liq_msg = "⬆️" if regime == "RISK_ON" else "⬇️"
-        except Exception as e:
-            print(f"Liquidity math error: {e}")
-            
+    # CRASH PROOFING: Wrap the whole block in try/except
+    try:
+        if macro and macro.get('net_liq') is not None:
+            # Check if it's a valid series
+            nl = macro['net_liq']
+            if not nl.empty:
+                liq_chg = nl.pct_change(63).iloc[-1]
+                regime = "RISK_ON" if liq_chg > 0 else "RISK_OFF"
+                liq_msg = "⬆️" if regime == "RISK_ON" else "⬇️"
+    except Exception as e:
+        print(f"Macro Math Skipped: {e}")
+        
     msg = f"📊 *MARKET REGIME: {regime}*\n"
     if macro and macro.get('spy') is not None:
         msg += f"SPY: {fmt_price(macro['spy'].iloc[-1])}\n"

@@ -1,4 +1,4 @@
-# main.py - Institutional Engine (Crash Fixed)
+# main.py - Institutional Engine (Crash Proof)
 import time
 import pandas as pd
 import numpy as np
@@ -41,8 +41,8 @@ STRATEGIC_TICKERS = [
 def safe_int(val):
     """Prevents crash when converting NaN to int"""
     try:
-        if pd.isna(val): return 0
-        return int(val)
+        if pd.isna(val) or val is None: return 0
+        return int(float(val))
     except: return 0
 
 def get_market_radar_regime(macro):
@@ -51,7 +51,7 @@ def get_market_radar_regime(macro):
         inflation = macro.get('inflation')
         
         if growth is None or inflation is None:
-            # Fallback to Liquidity Check if Growth Data Missing
+            # Fallback
             if macro.get('net_liq') is not None:
                 nl = macro['net_liq']
                 if len(nl) > 63 and nl.iloc[-1] > nl.iloc[-63]:
@@ -70,8 +70,7 @@ def get_market_radar_regime(macro):
         else:
             if i_impulse < 0: return "SLOWDOWN", "COOLING (Growth ⬇️ Inf ⬇️)"
             else: return "RISK_OFF", "STAGFLATION (Growth ⬇️ Inf ⬆️)"
-    except:
-        return "NEUTRAL", "Calc Error"
+    except: return "NEUTRAL", "Calc Error"
 
 def analyze_ticker(ticker, regime):
     try:
@@ -101,20 +100,24 @@ def analyze_ticker(ticker, regime):
         setup = {'active': False, 'msg': "None", 'target': 0, 'stop': 0, 'time': ''}
         score = 0
         
-        if last.get('Buy_Setup') == 9:
+        # DeMark
+        bs = last.get('Buy_Setup', 0); ss = last.get('Sell_Setup', 0)
+        if bs == 9:
             perf = last.get('Perfected')
             score += 3 if perf else 2
             setup = {'active': True, 'msg': f"DeMark BUY 9 {'(Perfected)' if perf else ''}", 'target': price+(atr*3), 'stop': price-(atr*1.5), 'time': '1-4 Weeks'}
-        elif last.get('Sell_Setup') == 9:
+        elif ss == 9:
             perf = last.get('Perfected')
             score += 3 if perf else 2
             setup = {'active': True, 'msg': f"DeMark SELL 9 {'(Perfected)' if perf else ''}", 'target': price-(atr*3), 'stop': price+(atr*1.5), 'time': '1-4 Weeks'}
             
+        # Squeeze
         if sq_res and not setup['active']:
             score += 2
             d = sq_res['bias']
             setup = {'active': True, 'msg': f"TTM Squeeze ({d})", 'target': price+(atr*4) if d=="BULLISH" else price-(atr*4), 'stop': price-(atr*2) if d=="BULLISH" else price+(atr*2), 'time': '3-10 Days'}
             
+        # RSI
         if last['RSI'] < 30: 
             score += 2
             if not setup['active']: setup = {'active': True, 'msg': "RSI Oversold", 'target': price+(atr*2), 'stop': price-atr, 'time': '1-3 Days'}
@@ -124,6 +127,7 @@ def analyze_ticker(ticker, regime):
                 
         if shannon['breakout']: score += 3
         
+        # Regime Overlay
         if "RISK_OFF" in regime and "BUY" in setup['msg']: score -= 2
         if "SLOWDOWN" in regime and "BUY" in setup['msg']: score -= 1
         
@@ -132,11 +136,13 @@ def analyze_ticker(ticker, regime):
             elif trend == "BEARISH": setup['msg'] = "Trend: Bearish Avoid"
             else: setup['msg'] = "Trend: Neutral"
         
+        # Safe count logic
+        cnt = bs if bs > ss else ss
+        
         return {
             'ticker': ticker, 'price': price, 'trend': trend, 'score': score,
             'setup': setup, 'squeeze': sq_res, 'shannon': shannon, 
-            'rsi': last['RSI'], 'adx': adx.iloc[-1], 
-            'demark_count': last.get('Buy_Setup') if last.get('Buy_Setup') > 0 else last.get('Sell_Setup')
+            'rsi': last['RSI'], 'adx': adx.iloc[-1], 'demark_count': cnt
         }
     except: return None
 
@@ -150,7 +156,7 @@ def format_portfolio_card(res):
     msg += f"Score: {res['score']}/10 | ADX: {adx_val:.1f}\n"
     msg += f"────────────────\n"
     
-    # SAFE INT conversion prevents crash
+    # SAFE INT ensures no crash on NaN
     dm_c = safe_int(res.get('demark_count', 0))
     msg += f"• **DeMark:** Count {dm_c}\n"
     

@@ -1,4 +1,4 @@
-# main.py - Institutional Engine (Market Radar Methodology)
+# main.py - Institutional Engine (Crash Fixed)
 import time
 import pandas as pd
 import numpy as np
@@ -51,10 +51,17 @@ def get_market_radar_regime(macro):
         inflation = macro.get('inflation')
         
         if growth is None or inflation is None:
-            return "NEUTRAL", "Data Unavailable"
+            # Fallback to Liquidity Only if Growth/Inflation data missing
+            if macro.get('net_liq') is not None:
+                if macro['net_liq'].iloc[-1] > macro['net_liq'].iloc[-63]:
+                    return "LIQUIDITY EXPANSION", "Fed Adding Liquidity (Growth Data Missing)"
+            return "NEUTRAL", "Macro Data Unavailable"
             
-        # Calculate 3-Month Momentum (Impulse)
-        # ISM is monthly, so 3 bars back. Inf is daily, so 63 bars.
+        # Calculate 3-Month Momentum
+        # Safety: Ensure we have enough data points
+        if len(growth) < 4 or len(inflation) < 64:
+             return "NEUTRAL", "Insufficient Macro History"
+
         g_impulse = growth.pct_change(3).iloc[-1]
         i_impulse = inflation.pct_change(63).iloc[-1]
         
@@ -77,8 +84,16 @@ def get_market_radar_regime(macro):
                 desc = "STAGFLATION (Growth ⬇️ Inf ⬆️) - Cash/Energy"
                 
         return regime, desc
-    except:
+    except Exception as e:
+        print(f"Regime Calc Error: {e}")
         return "NEUTRAL", "Calc Error"
+
+def safe_int(val):
+    """Prevents crash when converting NaN to int"""
+    try:
+        if pd.isna(val): return 0
+        return int(val)
+    except: return 0
 
 def analyze_ticker(ticker, regime):
     try:
@@ -86,6 +101,7 @@ def analyze_ticker(ticker, regime):
         df = safe_download(ticker, client)
         if df is None: return None
 
+        # Filter Illiquid (except crypto/futures)
         if '=F' not in ticker and '-USD' not in ticker:
             last_vol = df['Volume'].iloc[-5:].mean() * df['Close'].iloc[-1]
             if last_vol < 500000: return None 
@@ -108,7 +124,7 @@ def analyze_ticker(ticker, regime):
         setup = {'active': False, 'msg': "None", 'target': 0, 'stop': 0, 'time': ''}
         score = 0
         
-        # DeMark
+        # 1. DeMark
         if last.get('Buy_Setup') == 9:
             perf = last.get('Perfected')
             score += 3 if perf else 2
@@ -118,13 +134,13 @@ def analyze_ticker(ticker, regime):
             score += 3 if perf else 2
             setup = {'active': True, 'msg': f"DeMark SELL 9 {'(Perfected)' if perf else ''}", 'target': price-(atr*3), 'stop': price+(atr*1.5), 'time': '1-4 Weeks'}
             
-        # Squeeze
+        # 2. Squeeze
         if sq_res and not setup['active']:
             score += 2
             d = sq_res['bias']
             setup = {'active': True, 'msg': f"TTM Squeeze ({d})", 'target': price+(atr*4) if d=="BULLISH" else price-(atr*4), 'stop': price-(atr*2) if d=="BULLISH" else price+(atr*2), 'time': '3-10 Days'}
             
-        # RSI
+        # 3. RSI
         if last['RSI'] < 30: 
             score += 2
             if not setup['active']: setup = {'active': True, 'msg': "RSI Oversold", 'target': price+(atr*2), 'stop': price-atr, 'time': '1-3 Days'}
@@ -134,11 +150,9 @@ def analyze_ticker(ticker, regime):
                 
         if shannon['breakout']: score += 3
         
-        # --- REGIME FILTERS ---
-        # RISK OFF: Penalize all Buys
-        if regime == 'RISK_OFF' and "BUY" in setup['msg']: score -= 2
-        # SLOWDOWN: Penalize High Beta Buys (Crypto/Tech) but allow Defensive
-        if regime == 'SLOWDOWN' and "BUY" in setup['msg'] and ('-USD' in ticker or 'QQQ' in ticker): score -= 1
+        # Regime Overlay
+        if "RISK_OFF" in regime and "BUY" in setup['msg']: score -= 2
+        if "SLOWDOWN" in regime and "BUY" in setup['msg']: score -= 1
         
         if not setup['active']:
             if trend == "BULLISH" and last['RSI'] > 50: setup['msg'] = "Trend: Bullish Hold"
@@ -148,23 +162,30 @@ def analyze_ticker(ticker, regime):
         return {
             'ticker': ticker, 'price': price, 'trend': trend, 'score': score,
             'setup': setup, 'squeeze': sq_res, 'shannon': shannon, 
-            'rsi': last['RSI'], 'adx': adx.iloc[-1], 'demark_count': last.get('Buy_Setup') if last.get('Buy_Setup') > 0 else last.get('Sell_Setup')
+            'rsi': last['RSI'], 'adx': adx.iloc[-1], 
+            'demark_count': last.get('Buy_Setup') if last.get('Buy_Setup') > 0 else last.get('Sell_Setup')
         }
     except: return None
 
 def format_portfolio_card(res):
     icon = "🟢" if res['trend'] == "BULLISH" else "🔴"
     msg = f"{icon} *{res['ticker']}* @ {fmt_price(res['price'])}\n"
-    msg += f"Score: {res['score']}/10 | ADX: {res['adx']:.1f}\n"
+    
+    # Safely format numbers (handle NaNs)
+    adx_val = res['adx'] if pd.notna(res['adx']) else 0.0
+    rsi_val = res['rsi'] if pd.notna(res['rsi']) else 50.0
+    
+    msg += f"Score: {res['score']}/10 | ADX: {adx_val:.1f}\n"
     msg += f"────────────────\n"
     
-    dm_c = int(res.get('demark_count', 0))
+    # Safe Integer Conversion for DeMark
+    dm_c = safe_int(res.get('demark_count', 0))
     msg += f"• **DeMark:** Count {dm_c}\n"
     
     rsi_state = "Neutral"
-    if res['rsi'] > 70: rsi_state = "Overbought ⚠️"
-    elif res['rsi'] < 30: rsi_state = "Oversold 🛒"
-    msg += f"• **RSI:** {res['rsi']:.1f} ({rsi_state})\n"
+    if rsi_val > 70: rsi_state = "Overbought ⚠️"
+    elif rsi_val < 30: rsi_state = "Oversold 🛒"
+    msg += f"• **RSI:** {rsi_val:.1f} ({rsi_state})\n"
     
     sq_txt = f"{res['squeeze']['bias']} (Firing)" if res['squeeze'] else "None"
     msg += f"• **Squeeze:** {sq_txt}\n"
@@ -200,16 +221,17 @@ if __name__ == "__main__":
     
     send_telegram(f"🏗️ *SCAN STARTED*\nAssets: {len(full_list)}\nBatches: {len(batches)}\nEst. Time: {est_time} mins")
 
-    # 1. Macro (Market Radar Logic)
+    # 1. Macro (Crash Proof)
     try:
         macro = get_macro()
         regime, desc = get_market_radar_regime(macro)
-    except:
+    except Exception as e:
+        print(f"Macro Failed: {e}")
         regime = "NEUTRAL"; desc = "Macro Data Failed"
         
     send_telegram(f"📊 *MARKET REGIME: {regime}*\n{desc}")
 
-    # 2. PRIORITY: Portfolio Scan (IMMEDIATE)
+    # 2. PRIORITY: Scan Portfolio IMMEDIATE
     print("Scanning Portfolio...")
     port_results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:

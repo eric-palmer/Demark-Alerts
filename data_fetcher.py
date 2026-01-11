@@ -1,7 +1,8 @@
-# data_fetcher.py - Institutional Data (Raw & Filled)
+# data_fetcher.py - Institutional Data (Gap-Bridged)
 import pandas as pd
 import time
 import os
+import datetime
 import yfinance as yf
 from tiingo import TiingoClient
 
@@ -15,34 +16,39 @@ def get_tiingo_client():
 def fetch_tiingo(ticker, client):
     """Institutional Source: Tiingo"""
     try:
-        # 1. Crypto Handling (btcusd)
+        start_date = (datetime.datetime.now() - datetime.timedelta(days=730)).strftime('%Y-%m-%d')
+        
+        # 1. Crypto
         if '-USD' in ticker:
             sym = ticker.replace('-USD', '').lower() + 'usd'
-            data = client.get_crypto_price_history(tickers=[sym], startDate='2022-01-01', resampleFreq='1day')
+            data = client.get_crypto_price_history(tickers=[sym], startDate=start_date, resampleFreq='1day')
             df = pd.DataFrame(data[0].get('priceData', []))
             rename = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
             df = df.rename(columns=rename)
         
-        # 2. Stock Handling (FORCE RAW DATA)
+        # 2. Stocks (Use standard fetch to get adjusted data correctly)
         else:
-            # We request everything but manually select the raw columns
-            df = client.get_dataframe(ticker, startDate='2022-01-01')
-            # Select RAW columns to match broker prices
-            # If keys missing, fallback to whatever is there
-            cols = [c for c in ['open', 'high', 'low', 'close', 'volume'] if c in df.columns]
-            df = df[cols]
-            
-            rename = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
-            df = df.rename(columns=rename)
+            df = client.get_dataframe(ticker, startDate=start_date)
+            # Use Tiingo's adjusted columns if available (standard for technicals)
+            # If your SLV is $72, Tiingo's adjClose is likely the correct one to use
+            if 'adjClose' in df.columns:
+                df = df[['adjOpen', 'adjHigh', 'adjLow', 'adjClose', 'adjVolume']]
+                df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+            else:
+                df = df[['open', 'high', 'low', 'close', 'volume']]
+                df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
 
         df['Date'] = pd.to_datetime(df.index).tz_localize(None)
         df = df.set_index('Date')
         
-        # Force numeric & Fill Gaps (Crucial for ADX)
+        # FORCE CLEANING
         for c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
             
-        return df.ffill().dropna()
+        # THE FIX: Interpolate fills small gaps that break ADX
+        df = df.interpolate(method='time').ffill().bfill()
+        
+        return df
     except Exception:
         return None
 
@@ -66,7 +72,7 @@ def fetch_fallback(ticker):
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors='coerce')
         
-        return df.ffill().dropna()
+        return df.interpolate(method='time').ffill().bfill()
     except: return None
 
 def safe_download(ticker, client=None):
@@ -81,10 +87,8 @@ def safe_download(ticker, client=None):
     if df is None or len(df) < 5:
         df = fetch_fallback(ticker)
         
-    if df is not None:
-        # Final safety: Ensure we have enough rows for ADX(14)
-        if len(df) > 20: 
-            return df
+    if df is not None and len(df) > 30:
+        return df
             
     return None
 
@@ -103,21 +107,14 @@ def get_macro():
                 df = pd.DataFrame(r.json()['observations'])
                 return pd.to_numeric(df['value'], errors='coerce')
             
-            # Growth (ISM)
             ism = get('NAPM')
-            if ism is not None and not ism.empty: result['growth'] = ism
+            if ism is not None: result['growth'] = ism
             
-            # Inflation (Breakevens)
             inf = get('T5YIE')
-            if inf is not None and not inf.empty: result['inflation'] = inf
+            if inf is not None: result['inflation'] = inf
 
-            # Liquidity
-            walcl = get('WALCL')
-            tga = get('WTREGEN')
-            rrp = get('RRPONTSYD')
-            
-            if all(x is not None and not x.empty for x in [walcl, tga, rrp]):
-                # Slice to min length to align
+            walcl = get('WALCL'); tga = get('WTREGEN'); rrp = get('RRPONTSYD')
+            if all(x is not None for x in [walcl, tga, rrp]):
                 min_len = min(len(walcl), len(tga), len(rrp))
                 result['net_liq'] = (walcl.iloc[-min_len:].values/1000) - tga.iloc[-min_len:].values - rrp.iloc[-min_len:].values
                 result['net_liq'] = pd.Series(result['net_liq'])

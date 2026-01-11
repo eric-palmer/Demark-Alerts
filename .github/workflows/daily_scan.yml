@@ -1,25 +1,8 @@
-name: Run Scanner
-
-on:
-  schedule:
-    - cron: '0 21 * * *'
-  workflow_dispatch:
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install
-        run: pip install yfinance pandas requests numpy
-      - name: Run
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python main.py
+- name: Run
+  env:
+    TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+    TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+  run: |
+    python test_scan.py
+    python main.py

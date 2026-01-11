@@ -1,32 +1,32 @@
-name: Run Scanner
+name: Institutional Trading Scan
 
 on:
   schedule:
-    - cron: '0 21 * * *'  # 4 PM EST daily (9 PM UTC)
-  workflow_dispatch:
+    # Runs at 21:00 UTC (4:00 PM EST) every weekday
+    - cron: '0 21 * * 1-5'
+  workflow_dispatch: # This lets you click a button to run it manually
 
 jobs:
-  build:
+  run-scanner:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
 
-      - name: Install libraries
-        run: pip install yfinance pandas requests numpy
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
 
-      - name: Test Data Fetch
-        run: python test_scan.py
-
-      - name: Run Scanner
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python main.py
+    - name: Run Trading Engine
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+      run: python main.py

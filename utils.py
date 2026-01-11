@@ -1,43 +1,47 @@
-# utils.py - Utility functions
-import requests
+# utils.py - Helper functions
 import os
-import time
-import pandas as pd
+import requests
+
+def fmt_price(price):
+    """Format price nicely ($0.00)"""
+    if price is None: 
+        return "N/A"
+    try:
+        price = float(price)
+        if price < 0.1:
+            return f"${price:.4f}"
+        if price < 1.0:
+            return f"${price:.3f}"
+        return f"${price:.2f}"
+    except:
+        return str(price)
 
 def send_telegram(message):
+    """Send message to Telegram with error handling"""
     token = os.environ.get('TELEGRAM_TOKEN')
     chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+    
+    # If secrets are missing, just print to log instead of crashing
     if not token or not chat_id:
-        return False
-    for i in range(0, len(message), 4000):
-        try:
-            r = requests.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": message[i:i+4000], "parse_mode": "Markdown"},
-                timeout=10
-            )
-            if not r.ok:
-                print(f"Telegram error: {r.status_code}")
-            time.sleep(1)
-        except Exception as e:
-            print(f"Telegram error: {e}")
-            return False
-    return True
+        print("⚠️ TELEGRAM SECRETS MISSING")
+        print(f"[Would have sent]: {message}")
+        return
 
-def fmt_price(p):
-    if p is None or pd.isna(p):
-        return "N/A"
-    p = float(p)
-    if p < 0.01:
-        return f"${p:.6f}"
-    if p < 1:
-        return f"${p:.4f}"
-    return f"${p:.2f}"
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        'chat_id': chat_id,
+        'text': message,
+        'parse_mode': 'Markdown'
+    }
+    
+    try:
+        # 10 second timeout so the script doesn't freeze
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code != 200:
+            print(f"Telegram Error {resp.status_code}: {resp.text}")
+    except Exception as e:
+        print(f"Telegram Connection Failed: {e}")
 
 def get_session():
-    s = requests.Session()
-    s.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        'Accept': '*/*'
-    })
-    return s
+    """Legacy session helper"""
+    return requests.Session()

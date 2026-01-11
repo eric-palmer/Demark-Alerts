@@ -572,16 +572,25 @@ if __name__ == "__main__":
     else:
         print("  No power setups")
     
-    if perfected_demark:
-        print(f"  Sending {len(perfected_demark)} perfected DeMark...")
-        dm_msg = "🎯 *PERFECTED DEMARK*\n\n"
+        if imperfected_demark:
+        print(f"  Sending {len(imperfected_demark)} imperfected DeMark...")
+        im_msg = "○ *IMPERFECTED DEMARK*\n\n"
         
-        perf_sorted = sorted(perfected_demark, 
-                           key=lambda x: (x['demark']['tf'] == 'Weekly', 
-                                        x['demark']['signal'] == '13'), 
-                           reverse=True)
+        imperf_sorted = sorted(imperfected_demark,
+                             key=lambda x: (x['demark']['tf'] == 'Weekly',
+                                          x['demark']['signal'] == '13'),
+                             reverse=True)
         
-        for res in perf_sorted[:10]:
+        for res in imperf_sorted[:10]:
+            dm = res['demark']
+            im_msg += f"*{res['ticker']}* @ {fmt_price(res['price'])}\n"
+            im_msg += f"• {dm['type']} {dm['signal']} ({dm['tf']})\n"
+            im_msg += f"• Targets: {fmt_price(res['target_1'])} / {fmt_price(res['target_2'])}\n"
+            im_msg += f"• Stop: {fmt_price(res['stop'])}\n"
+            im_msg += f"• Timing: {res['timing']}\n\n"
+        
+        send_telegram(im_msg)
+
             dm_msg += format_signal_block(res, show_all=False)
         
         send_telegram(dm_msg)

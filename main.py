@@ -51,16 +51,12 @@ def get_market_radar_regime(macro):
         inflation = macro.get('inflation')
         
         if growth is None or inflation is None:
-            # Fallback
             if macro.get('net_liq') is not None:
                 nl = macro['net_liq']
                 if len(nl) > 63 and nl.iloc[-1] > nl.iloc[-63]:
                     return "LIQUIDITY EXPANSION", "Fed Adding Liquidity (Growth Data Missing)"
             return "NEUTRAL", "Macro Data Unavailable"
             
-        if len(growth) < 4 or len(inflation) < 64:
-             return "NEUTRAL", "Insufficient Macro History"
-
         g_impulse = growth.pct_change(3).iloc[-1]
         i_impulse = inflation.pct_change(63).iloc[-1]
         
@@ -102,6 +98,7 @@ def analyze_ticker(ticker, regime):
         
         # DeMark
         bs = last.get('Buy_Setup', 0); ss = last.get('Sell_Setup', 0)
+        
         if bs == 9:
             perf = last.get('Perfected')
             score += 3 if perf else 2
@@ -127,16 +124,14 @@ def analyze_ticker(ticker, regime):
                 
         if shannon['breakout']: score += 3
         
-        # Regime Overlay
         if "RISK_OFF" in regime and "BUY" in setup['msg']: score -= 2
-        if "SLOWDOWN" in regime and "BUY" in setup['msg']: score -= 1
         
         if not setup['active']:
             if trend == "BULLISH" and last['RSI'] > 50: setup['msg'] = "Trend: Bullish Hold"
             elif trend == "BEARISH": setup['msg'] = "Trend: Bearish Avoid"
             else: setup['msg'] = "Trend: Neutral"
         
-        # Safe count logic
+        # Calculate final counts safely
         cnt = bs if bs > ss else ss
         
         return {
@@ -156,7 +151,7 @@ def format_portfolio_card(res):
     msg += f"Score: {res['score']}/10 | ADX: {adx_val:.1f}\n"
     msg += f"────────────────\n"
     
-    # SAFE INT ensures no crash on NaN
+    # SAFE INT ensures no crash
     dm_c = safe_int(res.get('demark_count', 0))
     msg += f"• **DeMark:** Count {dm_c}\n"
     

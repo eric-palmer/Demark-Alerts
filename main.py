@@ -1,4 +1,4 @@
-# main.py - Institutional Engine (Crash Proof)
+# main.py - Institutional Engine (Debug Mode)
 import time
 import pandas as pd
 import numpy as np
@@ -39,7 +39,6 @@ STRATEGIC_TICKERS = [
 ]
 
 def safe_int(val):
-    """Prevents crash when converting NaN to int"""
     try:
         if pd.isna(val) or val is None: return 0
         return int(float(val))
@@ -51,7 +50,6 @@ def get_market_radar_regime(macro):
         inflation = macro.get('inflation')
         
         if growth is None or inflation is None:
-            # Fallback
             if macro.get('net_liq') is not None:
                 nl = macro['net_liq']
                 if len(nl) > 63 and nl.iloc[-1] > nl.iloc[-63]:
@@ -73,7 +71,18 @@ def analyze_ticker(ticker, regime):
     try:
         client = get_tiingo_client()
         df = safe_download(ticker, client)
-        if df is None: return None
+        if df is None: 
+            print(f"[{ticker}] FAIL: No Data Returned")
+            return None
+
+        # --- DEBUG BLOCK (This will show in your GitHub Logs) ---
+        if ticker in ['SLV', 'DJT']:
+            print(f"\n--- DEBUG: {ticker} ---")
+            print(f"Columns: {list(df.columns)}")
+            print(f"Last 2 Rows:\n{df[['Open', 'High', 'Low', 'Close']].tail(2)}")
+            print(f"High-Low Mean: {(df['High'] - df['Low']).mean()}")
+            print("-----------------------")
+        # --------------------------------------------------------
 
         if '=F' not in ticker and '-USD' not in ticker:
             last_vol = df['Volume'].iloc[-5:].mean() * df['Close'].iloc[-1]
@@ -97,7 +106,6 @@ def analyze_ticker(ticker, regime):
         setup = {'active': False, 'msg': "None", 'target': 0, 'stop': 0, 'time': ''}
         score = 0
         
-        # DeMark
         bs = last.get('Buy_Setup', 0); ss = last.get('Sell_Setup', 0)
         
         if bs == 9:
@@ -109,13 +117,11 @@ def analyze_ticker(ticker, regime):
             score += 3 if perf else 2
             setup = {'active': True, 'msg': f"DeMark SELL 9 {'(Perfected)' if perf else ''}", 'target': price-(atr*3), 'stop': price+(atr*1.5), 'time': '1-4 Weeks'}
             
-        # Squeeze
         if sq_res and not setup['active']:
             score += 2
             d = sq_res['bias']
             setup = {'active': True, 'msg': f"TTM Squeeze ({d})", 'target': price+(atr*4) if d=="BULLISH" else price-(atr*4), 'stop': price-(atr*2) if d=="BULLISH" else price+(atr*2), 'time': '3-10 Days'}
             
-        # RSI
         if last['RSI'] < 30: 
             score += 2
             if not setup['active']: setup = {'active': True, 'msg': "RSI Oversold", 'target': price+(atr*2), 'stop': price-atr, 'time': '1-3 Days'}
@@ -131,7 +137,6 @@ def analyze_ticker(ticker, regime):
             elif trend == "BEARISH": setup['msg'] = "Trend: Bearish Avoid"
             else: setup['msg'] = "Trend: Neutral"
         
-        # Safe count logic
         cnt = bs if bs > ss else ss
         
         return {
@@ -139,7 +144,9 @@ def analyze_ticker(ticker, regime):
             'setup': setup, 'squeeze': sq_res, 'shannon': shannon, 
             'rsi': last['RSI'], 'adx': adx.iloc[-1], 'demark_count': cnt
         }
-    except: return None
+    except Exception as e:
+        print(f"Analyze Error {ticker}: {e}")
+        return None
 
 def format_portfolio_card(res):
     icon = "🟢" if res['trend'] == "BULLISH" else "🔴"
@@ -151,7 +158,6 @@ def format_portfolio_card(res):
     msg += f"Score: {res['score']}/10 | ADX: {adx_val:.1f}\n"
     msg += f"────────────────\n"
     
-    # SAFE INT USAGE - This is the fix for your crash screenshot
     dm_c = safe_int(res.get('demark_count', 0))
     msg += f"• **DeMark:** Count {dm_c}\n"
     

@@ -1,4 +1,4 @@
-# data_fetcher.py - Institutional Data (Adjusted Priority)
+# data_fetcher.py - Institutional Data (X-Ray Matched)
 import pandas as pd
 import time
 import os
@@ -16,32 +16,25 @@ def fetch_tiingo(ticker, client):
     try:
         start_date = (datetime.datetime.now() - datetime.timedelta(days=730)).strftime('%Y-%m-%d')
         
-        # Crypto
         if '-USD' in ticker:
             sym = ticker.replace('-USD', '').lower() + 'usd'
             data = client.get_crypto_price_history(tickers=[sym], startDate=start_date, resampleFreq='1day')
             df = pd.DataFrame(data[0].get('priceData', []))
             rename = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
             df = df.rename(columns=rename)
-        
-        # Stocks
         else:
             df = client.get_dataframe(ticker, startDate=start_date)
-            
-            # CRITICAL FIX: Map Adjusted Columns (from your debug logs) to Standard Names
-            # This ensures we get the $72 price AND the volatility data
+            # CRITICAL: Map 'adjHigh' to 'High' based on X-Ray
             if 'adjClose' in df.columns:
                 df = df[['adjOpen', 'adjHigh', 'adjLow', 'adjClose', 'adjVolume']]
                 df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
             else:
-                # Fallback if adjusted missing
                 df = df[['open', 'high', 'low', 'close', 'volume']]
                 df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
 
         df['Date'] = pd.to_datetime(df.index).tz_localize(None)
         df = df.set_index('Date')
         
-        # Force Numeric & Fill Gaps
         for c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
             
@@ -68,7 +61,7 @@ def fetch_fallback(ticker):
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors='coerce')
         
-        return df.sort_index().interpolate(method='time').ffill().bfill()
+        return df.interpolate(method='time').ffill().bfill()
     except: return None
 
 def safe_download(ticker, client=None):

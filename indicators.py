@@ -73,21 +73,10 @@ def calc_adx(df, period=14):
         p_dm = np.where((up > down) & (up > 0), up, 0)
         m_dm = np.where((down > up) & (down > 0), down, 0)
         tr = pd.concat([df['High']-df['Low'], abs(df['High']-df['Close'].shift()), abs(df['Low']-df['Close'].shift())], axis=1).max(axis=1)
-        
-        # Fix Zero TR
-        tr = tr.replace(0, 0.0001)
-        
         atr = tr.ewm(alpha=1/period).mean()
         p_di = 100 * (pd.Series(p_dm).ewm(alpha=1/period).mean() / atr)
         m_di = 100 * (pd.Series(m_dm).ewm(alpha=1/period).mean() / atr)
         sum_di = (p_di + m_di).replace(0, 1)
         dx = 100 * abs(p_di - m_di) / sum_di
-        val = sanitize(dx.ewm(alpha=1/period).mean())
-        
-        if val.iloc[-1] == 0:
-            print(f"ADX Zero Debug: TR Mean={tr.mean()}")
-            
-        return val
-    except Exception as e:
-        print(f"ADX Fail: {e}")
-        return pd.Series([0]*len(df), index=df.index)
+        return sanitize(dx.ewm(alpha=1/period).mean())
+    except: return pd.Series([0]*len(df), index=df.index)

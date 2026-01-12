@@ -1,4 +1,4 @@
-# main.py - Institutional Engine (Debug Mode: Portfolio Only)
+# main.py - Institutional Engine (Crash Proof)
 import time
 import pandas as pd
 import numpy as np
@@ -38,27 +38,34 @@ STRATEGIC_TICKERS = [
     'DNA', 'TWST', 'GLW', 'KHC', 'LULU', 'YETI', 'DLR', 'EQIX', 'ORCL', 'LSF'
 ]
 
-# --- CRITICAL FIX: Safe Integer Converter ---
 def safe_int(val):
-    """Prevents crash when converting NaN/None to int"""
+    """CRITICAL FIX: Prevents crash when converting NaN to int"""
     try:
         if pd.isna(val) or val is None: return 0
         return int(float(val))
     except: return 0
 
 def get_market_radar_regime(macro):
+    """Calculates Regime safely, handles missing data"""
     try:
-        growth = macro.get('growth')
-        inflation = macro.get('inflation')
-        
-        if growth is None or inflation is None:
-            # Fallback
-            if macro.get('net_liq') is not None:
+        # Safety Check: Did we get data?
+        if not macro or macro.get('growth') is None or macro.get('inflation') is None:
+            # Fallback to simple Liquidity check if available
+            if macro and macro.get('net_liq') is not None:
                 nl = macro['net_liq']
-                if len(nl) > 63 and nl.iloc[-1] > nl.iloc[-63]:
-                    return "LIQUIDITY EXPANSION", "Fed Adding Liquidity (Growth Data Missing)"
+                # Check if it's a Series or scalar
+                if isinstance(nl, pd.Series) and len(nl) > 63:
+                    if nl.iloc[-1] > nl.iloc[-63]:
+                        return "LIQUIDITY EXPANSION", "Fed Adding Liquidity (Growth Missing)"
             return "NEUTRAL", "Macro Data Unavailable"
             
+        growth = macro['growth']
+        inflation = macro['inflation']
+        
+        # Ensure enough history
+        if len(growth) < 4 or len(inflation) < 64:
+             return "NEUTRAL", "Insufficient Macro History"
+
         g_impulse = growth.pct_change(3).iloc[-1]
         i_impulse = inflation.pct_change(63).iloc[-1]
         
@@ -68,7 +75,9 @@ def get_market_radar_regime(macro):
         else:
             if i_impulse < 0: return "SLOWDOWN", "COOLING (Growth ⬇️ Inf ⬇️)"
             else: return "RISK_OFF", "STAGFLATION (Growth ⬇️ Inf ⬆️)"
-    except: return "NEUTRAL", "Calc Error"
+    except Exception as e:
+        print(f"Regime Error: {e}")
+        return "NEUTRAL", "Calc Error"
 
 def analyze_ticker(ticker, regime):
     try:
@@ -76,6 +85,7 @@ def analyze_ticker(ticker, regime):
         df = safe_download(ticker, client)
         if df is None: return None
 
+        # Filter Illiquid
         if '=F' not in ticker and '-USD' not in ticker:
             last_vol = df['Volume'].iloc[-5:].mean() * df['Close'].iloc[-1]
             if last_vol < 500000: return None 
@@ -125,7 +135,6 @@ def analyze_ticker(ticker, regime):
             if not setup['active']: setup = {'active': True, 'msg': "RSI Overbought", 'target': price-(atr*2), 'stop': price+atr, 'time': '1-3 Days'}
                 
         if shannon['breakout']: score += 3
-        
         if "RISK_OFF" in regime and "BUY" in setup['msg']: score -= 2
         
         if not setup['active']:
@@ -133,7 +142,7 @@ def analyze_ticker(ticker, regime):
             elif trend == "BEARISH": setup['msg'] = "Trend: Bearish Avoid"
             else: setup['msg'] = "Trend: Neutral"
         
-        # Calculate final counts safely
+        # Calculate Counts
         cnt = bs if bs > ss else ss
         
         return {
@@ -153,7 +162,7 @@ def format_portfolio_card(res):
     msg += f"Score: {res['score']}/10 | ADX: {adx_val:.1f}\n"
     msg += f"────────────────\n"
     
-    # CRITICAL FIX: safe_int usage
+    # CRITICAL FIX: safe_int prevents crash
     dm_c = safe_int(res.get('demark_count', 0))
     msg += f"• **DeMark:** Count {dm_c}\n"
     
@@ -218,13 +227,38 @@ if __name__ == "__main__":
         port_msg += format_portfolio_card(r)
     send_telegram(port_msg)
 
-    # --- DEBUG EXIT ---
-    # This stops the script right here so you don't wait 4 hours.
-    print("🛑 DEBUG STOP: Portfolio sent. Ending early.")
-    exit()
-    # ------------------
-
-    # (Code below is skipped)
     remaining_list = [t for t in STRATEGIC_TICKERS if t not in CURRENT_PORTFOLIO]
     batches = [remaining_list[i:i + BATCH_SIZE] for i in range(0, len(remaining_list), BATCH_SIZE)]
-    # ... rest of loop
+    
+    all_results = []
+    for i, batch in enumerate(batches):
+        print(f"Processing Batch {i+1}/{len(batches)}...")
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_map = {executor.submit(analyze_ticker, t, regime): t for t in batch}
+            for future in as_completed(future_map):
+                res = future.result()
+                if res: all_results.append(res)
+
+        if i < len(batches) - 1:
+            print(f"Sleeping {SLEEP_TIME}s..."); time.sleep(SLEEP_TIME)
+
+    print("Generating Final Report...")
+    scan_msg = "🚨 *HIGH CONVICTION OPPORTUNITIES*\n\n"
+    all_results.sort(key=lambda x: x['score'], reverse=True)
+    
+    found_opp = False
+    for r in all_results:
+        if r['score'] >= 4:
+            found_opp = True
+            scan_msg += format_scanner_alert(r)
+            
+    if found_opp:
+        if len(scan_msg) > 4000:
+            parts = [scan_msg[i:i+4000] for i in range(0, len(scan_msg), 4000)]
+            for p in parts: send_telegram(p)
+        else:
+            send_telegram(scan_msg)
+    else:
+        send_telegram("✅ Scan Complete. No other setups found.")
+        
+    print("DONE")

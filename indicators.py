@@ -1,4 +1,4 @@
-# indicators.py - Verified Institutional Math
+# indicators.py - Verified Institutional Math (With Debugging)
 import pandas as pd
 import numpy as np
 
@@ -14,7 +14,9 @@ def calc_rsi(series, period=14):
         avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
         rs = avg_gain / avg_loss.replace(0, np.nan)
         return sanitize((100 - (100 / (1 + rs))).fillna(50))
-    except: return pd.Series([50]*len(series), index=series.index)
+    except Exception as e:
+        print(f"RSI Error: {e}")
+        return pd.Series([50]*len(series), index=series.index)
 
 def calc_squeeze(df):
     try:
@@ -30,7 +32,9 @@ def calc_squeeze(df):
         y = df['Close'].iloc[-20:].values; x = np.arange(len(y))
         slope = np.polyfit(x, y, 1)[0]
         return {'bias': "BULLISH" if slope > 0 else "BEARISH", 'tf': 'Daily'}
-    except: return None
+    except Exception as e:
+        # print(f"Squeeze Error: {e}") # Squeeze fails often on low volatility, ignore
+        return None
 
 def calc_demark(df):
     try:
@@ -53,7 +57,8 @@ def calc_demark(df):
                 if (highs[last] > highs[last-2] and highs[last] > highs[last-3]) or (highs[last-1] > highs[last-2] and highs[last-1] > highs[last-3]): perf = True
         df['Perfected'] = perf
         return df
-    except:
+    except Exception as e:
+        print(f"DeMark Error: {e}")
         df['Buy_Setup'] = 0; df['Sell_Setup'] = 0; df['Perfected'] = False
         return df
 
@@ -69,14 +74,26 @@ def calc_shannon(df):
 
 def calc_adx(df, period=14):
     try:
+        # Verify columns exist
+        if 'High' not in df.columns or 'Low' not in df.columns:
+            print("ADX Error: Missing High/Low columns")
+            return pd.Series([0]*len(df), index=df.index)
+
         up = df['High'].diff(); down = -df['Low'].diff()
         p_dm = np.where((up > down) & (up > 0), up, 0)
         m_dm = np.where((down > up) & (down > 0), down, 0)
+        
         tr = pd.concat([df['High']-df['Low'], abs(df['High']-df['Close'].shift()), abs(df['Low']-df['Close'].shift())], axis=1).max(axis=1)
+        
+        # Fix: Replace 0 TR with small number to prevent division by zero
+        tr = tr.replace(0, 0.0001)
+        
         atr = tr.ewm(alpha=1/period).mean()
         p_di = 100 * (pd.Series(p_dm).ewm(alpha=1/period).mean() / atr)
         m_di = 100 * (pd.Series(m_dm).ewm(alpha=1/period).mean() / atr)
         sum_di = (p_di + m_di).replace(0, 1)
         dx = 100 * abs(p_di - m_di) / sum_di
         return sanitize(dx.ewm(alpha=1/period).mean())
-    except: return pd.Series([0]*len(df), index=df.index)
+    except Exception as e:
+        print(f"ADX Calculation Error: {e}")
+        return pd.Series([0]*len(df), index=df.index)

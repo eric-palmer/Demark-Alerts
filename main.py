@@ -1,4 +1,4 @@
-# main.py - Institutional Engine (Production)
+# main.py - Institutional Engine (Crash Proof)
 import time
 import pandas as pd
 import numpy as np
@@ -39,6 +39,7 @@ STRATEGIC_TICKERS = [
 ]
 
 def safe_int(val):
+    """Prevents crash when converting NaN to int"""
     try:
         if pd.isna(val) or val is None: return 0
         return int(float(val))
@@ -50,6 +51,7 @@ def get_market_radar_regime(macro):
         inflation = macro.get('inflation')
         
         if growth is None or inflation is None:
+            # Fallback
             if macro.get('net_liq') is not None:
                 nl = macro['net_liq']
                 if len(nl) > 63 and nl.iloc[-1] > nl.iloc[-63]:
@@ -129,7 +131,7 @@ def analyze_ticker(ticker, regime):
             elif trend == "BEARISH": setup['msg'] = "Trend: Bearish Avoid"
             else: setup['msg'] = "Trend: Neutral"
         
-        # Calculate final counts safely
+        # Safe count logic
         cnt = bs if bs > ss else ss
         
         return {
@@ -149,7 +151,7 @@ def format_portfolio_card(res):
     msg += f"Score: {res['score']}/10 | ADX: {adx_val:.1f}\n"
     msg += f"────────────────\n"
     
-    # SAFE INT ensures no crash
+    # SAFE INT USAGE - This is the fix for your crash screenshot
     dm_c = safe_int(res.get('demark_count', 0))
     msg += f"• **DeMark:** Count {dm_c}\n"
     

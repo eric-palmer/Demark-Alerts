@@ -1,4 +1,4 @@
-# data_fetcher.py - Institutional Data (Gap-Bridged)
+# data_fetcher.py - Institutional Router (Fail-Safe)
 import pandas as pd
 import time
 import os
@@ -11,26 +11,49 @@ PAUSE_SEC = 0.2
 
 def get_tiingo_client():
     api_key = os.environ.get('TIINGO_API_KEY')
-    return TiingoClient({'api_key': api_key, 'session': True}) if api_key else None
+    if not api_key: return None
+    return TiingoClient({'api_key': api_key, 'session': True})
+
+def fetch_fallback(ticker):
+    """Backup Source: Yahoo (Robust)"""
+    try:
+        dat = yf.Ticker(ticker)
+        df = dat.history(period="2y", auto_adjust=True)
+        if df.empty: return None
+        
+        # Clean Yahoo Data
+        df = df.reset_index()
+        df.columns = [c.lower() for c in df.columns]
+        rename = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
+        df = df.rename(columns=rename)
+        
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
+            df = df.set_index('Date')
+            
+        # Force Float & Fill Gaps
+        for c in ['Open', 'High', 'Low', 'Close']:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors='coerce')
+        
+        return df.interpolate(method='time').ffill().bfill()
+    except: return None
 
 def fetch_tiingo(ticker, client):
     """Institutional Source: Tiingo"""
     try:
-        # Get 2 years of data to ensure indicators warm up
         start_date = (datetime.datetime.now() - datetime.timedelta(days=730)).strftime('%Y-%m-%d')
         
-        # 1. Crypto
         if '-USD' in ticker:
             sym = ticker.replace('-USD', '').lower() + 'usd'
             data = client.get_crypto_price_history(tickers=[sym], startDate=start_date, resampleFreq='1day')
             df = pd.DataFrame(data[0].get('priceData', []))
             rename = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
             df = df.rename(columns=rename)
-        
-        # 2. Stocks 
         else:
+            # Stocks
             df = client.get_dataframe(ticker, startDate=start_date)
-            # Prefer Adjusted Data for technicals, fallback to raw
+            # Prioritize Adj columns, fallback to raw
             if 'adjClose' in df.columns:
                 df = df[['adjOpen', 'adjHigh', 'adjLow', 'adjClose', 'adjVolume']]
                 df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
@@ -41,50 +64,26 @@ def fetch_tiingo(ticker, client):
         df['Date'] = pd.to_datetime(df.index).tz_localize(None)
         df = df.set_index('Date')
         
-        # --- CRITICAL FIXES ---
-        # 1. Force everything to numbers (coercing errors to NaN)
         for c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
             
-        # 2. Bridge the Gaps (Interpolate missing days so ADX doesn't break)
-        df = df.interpolate(method='time').ffill().bfill()
-        
-        return df
-    except Exception:
-        return None
-
-def fetch_fallback(ticker):
-    """Backup Source: Yahoo"""
-    try:
-        dat = yf.Ticker(ticker)
-        df = dat.history(period="2y", auto_adjust=True)
-        if df.empty: return None
-        
-        df = df.reset_index()
-        df.columns = [c.lower() for c in df.columns]
-        rename = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
-        df = df.rename(columns=rename)
-        
-        if 'Date' in df.columns:
-            df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
-            df = df.set_index('Date')
-            
-        for c in ['Open', 'High', 'Low', 'Close']:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors='coerce')
-        
         return df.interpolate(method='time').ffill().bfill()
-    except: return None
+    except Exception as e:
+        # If Tiingo fails (403 Forbidden), print error and return None to trigger fallback
+        print(f"Tiingo Error for {ticker}: {e}")
+        return None
 
 def safe_download(ticker, client=None):
     if any(x in ticker for x in ['=F', 'DX-Y', '=X']):
         return fetch_fallback(ticker)
 
     df = None
+    # Try Tiingo if client exists
     if client:
         time.sleep(PAUSE_SEC)
         df = fetch_tiingo(ticker, client)
     
+    # If Tiingo failed (df is None), USE FALLBACK
     if df is None or len(df) < 5:
         df = fetch_fallback(ticker)
         
@@ -110,10 +109,8 @@ def get_macro():
             
             ism = get('NAPM')
             if ism is not None: result['growth'] = ism
-            
             inf = get('T5YIE')
             if inf is not None: result['inflation'] = inf
-
             walcl = get('WALCL'); tga = get('WTREGEN'); rrp = get('RRPONTSYD')
             if all(x is not None for x in [walcl, tga, rrp]):
                 min_len = min(len(walcl), len(tga), len(rrp))

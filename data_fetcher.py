@@ -1,4 +1,4 @@
-# data_fetcher.py - Production Router
+# data_fetcher.py - Institutional Router (Data Health Check)
 import pandas as pd
 import time
 import os
@@ -16,7 +16,7 @@ def fetch_tiingo(ticker, client):
     try:
         start_date = (datetime.datetime.now() - datetime.timedelta(days=730)).strftime('%Y-%m-%d')
         
-        # Crypto
+        # 1. Crypto
         if '-USD' in ticker:
             sym = ticker.replace('-USD', '').lower() + 'usd'
             data = client.get_crypto_price_history(tickers=[sym], startDate=start_date, resampleFreq='1day')
@@ -24,27 +24,35 @@ def fetch_tiingo(ticker, client):
             rename = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
             df = df.rename(columns=rename)
         
-        # Stocks (Using Adjusted Data from your logs)
+        # 2. Stocks
         else:
             df = client.get_dataframe(ticker, startDate=start_date)
-            # Map the exact columns seen in your diagnostic logs
+            
+            # HEALTH CHECK: Do Adjusted columns actually have data?
+            # Check if 'adjClose' exists and is not mostly NaN
+            use_adj = False
             if 'adjClose' in df.columns:
+                if df['adjClose'].isnull().sum() < len(df) * 0.5: # If >50% valid
+                    use_adj = True
+            
+            if use_adj:
+                # Use Adjusted
                 df = df[['adjOpen', 'adjHigh', 'adjLow', 'adjClose', 'adjVolume']]
                 df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
             else:
-                # Fallback to raw if adjusted missing
+                # Fallback to RAW (We know this works from your log)
                 df = df[['open', 'high', 'low', 'close', 'volume']]
                 df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
 
         df['Date'] = pd.to_datetime(df.index).tz_localize(None)
         df = df.set_index('Date')
         
-        # Force numeric & Fill Gaps
         for c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
             
         return df.interpolate(method='time').ffill().bfill()
-    except Exception:
+    except Exception as e:
+        print(f"Tiingo Error {ticker}: {e}")
         return None
 
 def fetch_fallback(ticker):
@@ -102,10 +110,8 @@ def get_macro():
             
             ism = get('NAPM')
             if ism is not None: result['growth'] = ism
-            
             inf = get('T5YIE')
             if inf is not None: result['inflation'] = inf
-
             walcl = get('WALCL'); tga = get('WTREGEN'); rrp = get('RRPONTSYD')
             if all(x is not None for x in [walcl, tga, rrp]):
                 min_len = min(len(walcl), len(tga), len(rrp))

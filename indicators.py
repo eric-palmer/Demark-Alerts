@@ -1,4 +1,4 @@
-# indicators.py - Verified Institutional Math (Fixed)
+# indicators.py - Verified Institutional Math (True DeMark)
 import pandas as pd
 import numpy as np
 
@@ -6,11 +6,10 @@ def sanitize(series):
     return series.fillna(0)
 
 def calc_ma_trend(df):
-    """Calculates Moving Averages for Trend Context"""
+    """Trend Stack"""
     try:
         sma50 = df['Close'].rolling(50).mean()
         sma200 = df['Close'].rolling(200).mean()
-        # Exponential (for Shannon)
         ema8 = df['Close'].ewm(span=8, adjust=False).mean()
         ema21 = df['Close'].ewm(span=21, adjust=False).mean()
         return {'sma50': sma50, 'sma200': sma200, 'ema8': ema8, 'ema21': ema21}
@@ -19,7 +18,7 @@ def calc_ma_trend(df):
         return {'sma50': z, 'sma200': z, 'ema8': z, 'ema21': z}
 
 def calc_trend_stack(df):
-    """Brian Shannon's Trend Stack"""
+    """Shannon Stack Status"""
     try:
         c = df['Close']
         ema8 = c.ewm(span=8, adjust=False).mean()
@@ -31,11 +30,105 @@ def calc_trend_stack(df):
         
         if last_c > last_8 > last_21 > last_50: status = "Strong Uptrend (Price > 8 > 21 > 50)"
         elif last_c < last_8 < last_21 < last_50: status = "Strong Downtrend (Price < 8 < 21 < 50)"
-        elif last_c > last_8: status = "Positive Momentum (Holding 8 EMA)"
+        elif last_c > last_8: status = "Positive Momentum"
         else: status = "No Trend (Wait)"
-            
         return {'status': status}
     except: return {'status': "Data Error"}
+
+def calc_demark_detailed(df):
+    """
+    True Institutional DeMark Logic:
+    1. Calculates Setup (9 consecutive closes)
+    2. Calculates Countdown (13 non-consecutive closes AFTER Setup 9 completes)
+    3. Checks Perfection (Bar 8 or 9 vs Bar 6 and 7)
+    """
+    try:
+        c = df['Close'].values
+        h = df['High'].values
+        l = df['Low'].values
+        
+        # 1. SETUP (9)
+        buy_setup = np.zeros(len(c), dtype=int)
+        sell_setup = np.zeros(len(c), dtype=int)
+        
+        # Vectorized Setup Count
+        # Compare Close to Close 4 bars ago
+        for i in range(4, len(c)):
+            if c[i] < c[i-4]:
+                buy_setup[i] = buy_setup[i-1] + 1
+            else:
+                buy_setup[i] = 0
+                
+            if c[i] > c[i-4]:
+                sell_setup[i] = sell_setup[i-1] + 1
+            else:
+                sell_setup[i] = 0
+                
+        # 2. COUNTDOWN (13) - Starts only after a completed 9
+        # This requires a state machine loop
+        buy_countdown = 0
+        sell_countdown = 0
+        buy_setup_active = False
+        sell_setup_active = False
+        
+        # We only care about the *current* status for the report, 
+        # but we need history to calculate it.
+        # Scan last 100 bars for efficiency
+        lookback = 100 if len(c) > 100 else len(c)
+        start_idx = len(c) - lookback
+        
+        for i in range(start_idx, len(c)):
+            # Activate Setup?
+            if buy_setup[i] == 9: buy_setup_active = True; buy_countdown = 0
+            if sell_setup[i] == 9: sell_setup_active = True; sell_countdown = 0
+            
+            # Count 13 (Price <= Low 2 bars ago for Buy)
+            if buy_setup_active and i >= 2:
+                if c[i] <= l[i-2]: buy_countdown += 1
+                if buy_countdown == 13: buy_setup_active = False # Reset after 13
+                
+            # Count 13 (Price >= High 2 bars ago for Sell)
+            if sell_setup_active and i >= 2:
+                if c[i] >= h[i-2]: sell_countdown += 1
+                if sell_countdown == 13: sell_setup_active = False # Reset
+        
+        # 3. PERFECTION CHECK (Current Bar)
+        last_idx = len(c) - 1
+        perf = False
+        
+        # Buy Perfection: Low of 8 or 9 < Low of 6 and 7
+        if buy_setup[last_idx] >= 9:
+            # Check indices relative to current
+            # If current is 9 (idx), then 8 is idx-1, etc.
+            l9 = l[last_idx]; l8 = l[last_idx-1]
+            l7 = l[last_idx-2]; l6 = l[last_idx-3]
+            if (l9 < l7 and l9 < l6) or (l8 < l7 and l8 < l6):
+                perf = True
+                
+        # Sell Perfection: High of 8 or 9 > High of 6 and 7
+        if sell_setup[last_idx] >= 9:
+            h9 = h[last_idx]; h8 = h[last_idx-1]
+            h7 = h[last_idx-2]; h6 = h[last_idx-3]
+            if (h9 > h7 and h9 > h6) or (h8 > h7 and h8 > h6):
+                perf = True
+
+        # Current Status Return
+        bs_curr = buy_setup[-1]
+        ss_curr = sell_setup[-1]
+        
+        # Decide which to report (whichever is active or higher)
+        if bs_curr > 0: 
+            return {'type': 'Buy', 'count': bs_curr, 'countdown': buy_countdown, 'perf': perf}
+        elif ss_curr > 0:
+            return {'type': 'Sell', 'count': ss_curr, 'countdown': sell_countdown, 'perf': perf}
+        else:
+            # If currently 0, but we have a countdown running
+            if buy_countdown > 0: return {'type': 'Buy', 'count': 0, 'countdown': buy_countdown, 'perf': False}
+            if sell_countdown > 0: return {'type': 'Sell', 'count': 0, 'countdown': sell_countdown, 'perf': False}
+            
+        return {'type': 'Neutral', 'count': 0, 'countdown': 0, 'perf': False}
+        
+    except: return {'type': 'Error', 'count': 0, 'countdown': 0, 'perf': False}
 
 def calc_macd(df):
     try:
@@ -74,32 +167,6 @@ def calc_squeeze(df):
         slope = np.polyfit(x, y, 1)[0]
         return {'bias': "BULLISH" if slope > 0 else "BEARISH", 'tf': 'Daily'}
     except: return None
-
-def calc_demark(df):
-    try:
-        df = df.copy()
-        c = df['Close'].values
-        c_4 = np.roll(c, 4); c_4[:4] = c[:4] 
-        buy_setup = (c < c_4); sell_setup = (c > c_4)
-        def count(condition):
-            s = pd.Series(condition)
-            return s.groupby((s != s.shift()).cumsum()).cumsum() * s
-        df['Buy_Setup'] = count(buy_setup)
-        df['Sell_Setup'] = count(sell_setup)
-        
-        last = len(df) - 1; perf = False
-        if last > 10:
-            if df['Buy_Setup'].iloc[-1] == 9:
-                lows = df['Low'].values
-                if (lows[last] < lows[last-2] and lows[last] < lows[last-3]) or (lows[last-1] < lows[last-2] and lows[last-1] < lows[last-3]): perf = True
-            elif df['Sell_Setup'].iloc[-1] == 9:
-                highs = df['High'].values
-                if (highs[last] > highs[last-2] and highs[last] > highs[last-3]) or (highs[last-1] > highs[last-2] and highs[last-1] > highs[last-3]): perf = True
-        df['Perfected'] = perf
-        return df
-    except:
-        df['Buy_Setup'] = 0; df['Sell_Setup'] = 0; df['Perfected'] = False
-        return df
 
 def calc_shannon(df):
     try:

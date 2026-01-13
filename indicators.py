@@ -1,30 +1,41 @@
-# indicators.py - Verified Institutional Math (Options Ready)
+# indicators.py - Verified Institutional Math (Fixed)
 import pandas as pd
 import numpy as np
 
 def sanitize(series):
     return series.fillna(0)
 
-def calc_hv(df):
-    """Historical Volatility (20-day annualized)"""
-    try:
-        log_returns = np.log(df['Close'] / df['Close'].shift(1))
-        # Annualized Volatility (252 trading days)
-        hv = log_returns.rolling(20).std() * np.sqrt(252) * 100
-        return sanitize(hv)
-    except: return pd.Series([0]*len(df), index=df.index)
-
 def calc_ma_trend(df):
-    """Trend Stack (Simple & Exponential)"""
+    """Calculates Moving Averages for Trend Context"""
     try:
         sma50 = df['Close'].rolling(50).mean()
         sma200 = df['Close'].rolling(200).mean()
+        # Exponential (for Shannon)
         ema8 = df['Close'].ewm(span=8, adjust=False).mean()
         ema21 = df['Close'].ewm(span=21, adjust=False).mean()
         return {'sma50': sma50, 'sma200': sma200, 'ema8': ema8, 'ema21': ema21}
     except:
         z = pd.Series([0]*len(df), index=df.index)
         return {'sma50': z, 'sma200': z, 'ema8': z, 'ema21': z}
+
+def calc_trend_stack(df):
+    """Brian Shannon's Trend Stack"""
+    try:
+        c = df['Close']
+        ema8 = c.ewm(span=8, adjust=False).mean()
+        ema21 = c.ewm(span=21, adjust=False).mean()
+        sma50 = c.rolling(50).mean()
+        
+        last_c = c.iloc[-1]; last_8 = ema8.iloc[-1]
+        last_21 = ema21.iloc[-1]; last_50 = sma50.iloc[-1]
+        
+        if last_c > last_8 > last_21 > last_50: status = "Strong Uptrend (Price > 8 > 21 > 50)"
+        elif last_c < last_8 < last_21 < last_50: status = "Strong Downtrend (Price < 8 < 21 < 50)"
+        elif last_c > last_8: status = "Positive Momentum (Holding 8 EMA)"
+        else: status = "No Trend (Wait)"
+            
+        return {'status': status}
+    except: return {'status': "Data Error"}
 
 def calc_macd(df):
     try:
@@ -75,6 +86,7 @@ def calc_demark(df):
             return s.groupby((s != s.shift()).cumsum()).cumsum() * s
         df['Buy_Setup'] = count(buy_setup)
         df['Sell_Setup'] = count(sell_setup)
+        
         last = len(df) - 1; perf = False
         if last > 10:
             if df['Buy_Setup'].iloc[-1] == 9:
@@ -112,29 +124,16 @@ def calc_adx(df, period=14):
         dx = 100 * abs(p_di - m_di) / (p_di + m_di)
         return sanitize(dx.ewm(alpha=1/period, min_periods=period).mean())
     except: return pd.Series([0]*len(df), index=df.index)
-    
-def calc_trend_stack(df):
+
+def calc_hv(df):
     try:
-        c = df['Close']
-        ema8 = c.ewm(span=8, adjust=False).mean()
-        ema21 = c.ewm(span=21, adjust=False).mean()
-        sma50 = c.rolling(50).mean()
-        sma200 = c.rolling(200).mean()
-        
-        last_c = c.iloc[-1]; last_8 = ema8.iloc[-1]; last_21 = ema21.iloc[-1]; last_50 = sma50.iloc[-1]
-        
-        if last_c > last_8 > last_21 > last_50: status = "Strong Uptrend (Price > 8 > 21 > 50)"
-        elif last_c < last_8 < last_21 < last_50: status = "Strong Downtrend (Price < 8 < 21 < 50)"
-        elif last_c > last_8: status = "Positive Momentum (Holding 8 EMA)"
-        else: status = "Neutral / Choppy"
-            
-        return {'status': status, 'sma50': last_50, 'sma200': sma200.iloc[-1]}
-    except: return {'status': "Data Error", 'sma50': 0, 'sma200': 0}
+        log_returns = np.log(df['Close'] / df['Close'].shift(1))
+        return sanitize(log_returns.rolling(20).std() * np.sqrt(252) * 100)
+    except: return pd.Series([0]*len(df), index=df.index)
 
 def calc_rvol(df):
     try:
-        vol = df['Volume']
-        avg = vol.rolling(20).mean()
+        vol = df['Volume']; avg = vol.rolling(20).mean()
         if avg.iloc[-1] == 0: return 1.0
         return vol.iloc[-1] / avg.iloc[-1]
     except: return 1.0

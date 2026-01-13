@@ -1,15 +1,14 @@
-# main.py - Institutional Engine (Options Enabled)
+# main.py - Institutional Engine (Polished & Final)
 import time
 import pandas as pd
 import numpy as np
 import random
-import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from data_fetcher import safe_download, get_macro, get_tiingo_client
 from indicators import (calc_rsi, calc_squeeze, calc_demark, 
                         calc_shannon, calc_adx, calc_ma_trend, 
-                        calc_macd, calc_hv, calc_rvol, calc_donchian)
+                        calc_macd, calc_trend_stack, calc_rvol, calc_donchian, calc_hv)
 from utils import send_telegram, fmt_price
 
 # --- CONFIGURATION ---
@@ -54,17 +53,16 @@ def get_market_radar_regime(macro):
         growth = macro.get('growth')
         inflation = macro.get('inflation')
         if growth is None or inflation is None:
-            if macro.get('net_liq') is not None:
-                return "NEUTRAL", "Macro Data Unavailable"
             return "NEUTRAL", "Macro Data Unavailable"
         g_imp = growth.pct_change(3).iloc[-1]
         i_imp = inflation.pct_change(63).iloc[-1]
+        
         if g_imp > 0:
-            if i_imp < 0: return "RISK_ON", "GOLDILOCKS (Growth ⬆️ Inf ⬇️)"
-            else: return "REFLATION", "HEATING UP (Growth ⬆️ Inf ⬆️)"
+            if i_imp < 0: return "GOLDILOCKS", "Risk On (Longs Preferred)"
+            else: return "REFLATION", "Inflationary (Commodities Long)"
         else:
-            if i_imp < 0: return "SLOWDOWN", "COOLING (Growth ⬇️ Inf ⬇️)"
-            else: return "RISK_OFF", "STAGFLATION (Growth ⬇️ Inf ⬆️)"
+            if i_imp < 0: return "SLOWDOWN", "Deflationary (Bonds/Quality)"
+            else: return "STAGFLATION", "Risk Off (Cash/Shorts)"
     except: return "NEUTRAL", "Calc Error"
 
 def get_demark_status(df):
@@ -87,15 +85,15 @@ def analyze_ticker(ticker, regime, detailed=False):
             last_vol = df['Volume'].iloc[-5:].mean() * df['Close'].iloc[-1]
             if last_vol < 500000: return None 
 
-        # --- INDICATORS ---
+        # --- CALCULATIONS ---
         df['RSI'] = calc_rsi(df['Close'])
         df = calc_demark(df)
         sq_res = calc_squeeze(df)
         shannon = calc_shannon(df)
         adx = calc_adx(df)
+        stack = calc_trend_stack(df)
         ma = calc_ma_trend(df)
         macd_data = calc_macd(df)
-        hv = calc_hv(df)
         rvol = calc_rvol(df)
         struct = calc_donchian(df)
         
@@ -104,43 +102,41 @@ def analyze_ticker(ticker, regime, detailed=False):
         atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
         if pd.isna(atr): atr = price * 0.02
 
-        # --- WEEKLY ---
+        # --- WEEKLY ANALYSIS ---
         weekly_txt = "Neutral"
         if detailed:
             try:
                 df_w = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
                 df_w = calc_demark(df_w)
                 w_dm = get_demark_status(df_w)
+                
                 if w_dm['count'] > 0:
-                    ctx = "Setup"
-                    if w_dm['count'] >= 8: ctx = "Near Exhaustion"
-                    if w_dm['is_9']: ctx = "REVERSAL RISK"
-                    weekly_txt = f"{w_dm['type']} {w_dm['count']} ({ctx})"
+                    w_ctx = "Building"
+                    if w_dm['count'] >= 8: w_ctx = "Near Exhaustion"
+                    if w_dm['is_9']: w_ctx = "REVERSAL SIGNAL"
+                    weekly_txt = f"{w_dm['type']} {w_dm['count']} ({w_ctx})"
             except: pass
 
         # --- SCORING & BIAS ---
         score = 0
-        bias = "Neutral"
         
-        # 1. Trend (Adaptive for Young Assets)
+        # 1. Trend (200d)
         sma200 = ma['sma200'].iloc[-1]
-        if sma200 > 0:
-            lt_bias = "Bullish" if price > sma200 else "Bearish"
-            score += 2 if "Bull" in lt_bias else -2
-        else: lt_bias = "Unknown (New Asset)"
-            
-        # 2. Momentum
+        lt_bias = "Bullish (Above 200d)" if price > sma200 else "Bearish (Below 200d)"
+        score += 2 if "Bull" in lt_bias else -2
+        
+        # 2. Momentum (MACD)
         macd_val = macd_data['macd'].iloc[-1]
         macd_sig = macd_data['signal'].iloc[-1]
-        mt_bias = "Positive" if macd_val > macd_sig else "Negative"
+        mt_bias = "Positive Momentum" if macd_val > macd_sig else "Negative Momentum"
         score += 1 if macd_val > macd_sig else -1
         
-        # 3. Short Term
+        # 3. Short Term (DeMark/RSI)
         daily_dm = get_demark_status(df)
         st_bias = "Neutral"
         
         if daily_dm['is_9']:
-            st_bias = f"{daily_dm['type']} 9 (Reversal)"
+            st_bias = f"{daily_dm['type']} 9 Reversal"
             score += 3 if daily_dm['type'] == 'Buy' else -3
         elif daily_dm['count'] > 0:
             st_bias = f"{daily_dm['type']} {daily_dm['count']}"
@@ -157,41 +153,18 @@ def analyze_ticker(ticker, regime, detailed=False):
         if rvol_val > 1.5: score = score * 1.2
 
         # --- TARGETS & TIMING ---
-        # Donchian or ATR fallback
-        if score > 0:
+        if score > 0: 
             target = struct['high'] if struct['high'] > price else price + (atr * 3)
             stop = struct['low'] if struct['low'] < price else price - (atr * 1.5)
         else:
             target = struct['low'] if struct['low'] < price else price - (atr * 3)
             stop = struct['high'] if struct['high'] > price else price + (atr * 1.5)
             
-        # ATR Velocity (Days to Target)
         dist = abs(target - price)
-        # Assuming 1.5x ATR daily move is optimistic, so use 0.8x for conservative timing
         daily_move = atr * 0.8 
-        days_to_target = max(1, int(dist / daily_move))
-        
-        # --- OPTIONS STRATEGY ---
-        hv_val = hv.iloc[-1]
-        # Logic: High HV + High RSI = Sell Premium. Low HV + Squeeze = Buy Premium.
-        opt_strat = "Shares"
-        
-        if days_to_target < 10: expiry = "Weekly Exp"
-        elif days_to_target < 30: expiry = "Monthly Exp"
-        else: expiry = "LEAPS / Shares"
-        
-        strike = round(target)
-        
-        if score >= 3: # Bullish Options
-            if hv_val < 30 or sq_res: opt_strat = f"Long Call (Strike ${strike})" # Cheap Vol
-            elif hv_val > 50: opt_strat = f"Bull Put Spread (Sold under ${int(stop)})" # Expensive Vol
-            else: opt_strat = f"Call Debit Spread (Target ${strike})"
-        elif score <= -3: # Bearish Options
-            if hv_val < 30 or sq_res: opt_strat = f"Long Put (Strike ${strike})"
-            elif hv_val > 50: opt_strat = f"Bear Call Spread (Sold over ${int(stop)})"
-            else: opt_strat = f"Put Debit Spread (Target ${strike})"
+        days = max(1, int(dist / daily_move))
 
-        # Verdict
+        # --- VERDICT ---
         rec = "⚪ NEUTRAL"
         if score >= 4: rec = "🟢 STRONG BUY"
         elif score >= 2: rec = "🟢 BUY"
@@ -199,7 +172,7 @@ def analyze_ticker(ticker, regime, detailed=False):
         elif score <= -2: rec = "🔴 SHORT"
 
         adx_val = adx.iloc[-1]
-        adx_txt = "Trending" if adx_val > 25 else "Ranging"
+        adx_txt = "Strong Trend" if adx_val > 25 else "No Trend (Wait)"
 
         return {
             'ticker': ticker, 'price': price, 'score': round(score, 1), 'rec': rec,
@@ -209,23 +182,19 @@ def analyze_ticker(ticker, regime, detailed=False):
                 'weekly': weekly_txt,
                 'rsi': f"{rsi_val:.1f} ({'Oversold' if rsi_val<30 else ('Overbought' if rsi_val>70 else 'Neutral')})",
                 'adx': f"{adx_val:.1f} ({adx_txt})",
-                'stack': ma['status'],
+                'stack': stack['status'],
                 'vol': f"{rvol_val:.1f}x ({'High' if rvol_val>1.5 else 'Normal'})",
                 'squeeze': sq_res['bias'] if sq_res else "None"
             },
-            'plan': {'target': target, 'stop': stop, 'days': days_to_target},
-            'options': {'strat': opt_strat, 'expiry': expiry}
+            'plan': {'target': target, 'stop': stop, 'days': days}
         }
     except: return None
 
 def format_card(res):
     t = res['techs']
-    p = res['plan']
-    o = res['options']
-    
     msg = f"═════════════════════════\n"
     msg += f"*{res['ticker']}* @ {fmt_price(res['price'])}\n"
-    msg += f"**{res['rec']}** ({res['score']})\n"
+    msg += f"**{res['rec']}** (Score: {res['score']})\n\n"
     
     msg += f"🕰️ **Outlook:**\n"
     msg += f"   • Short: {res['horizons']['short']}\n"
@@ -234,19 +203,16 @@ def format_card(res):
     
     msg += f"📊 **Vitals:**\n"
     msg += f"   • Trend: {t['stack']}\n"
-    msg += f"   • DeMark: D:{t['demark']} | W:{t['weekly']}\n"
+    msg += f"   • DeMark (D): {t['demark']}\n"
+    msg += f"   • DeMark (W): {t['weekly']}\n"
     msg += f"   • RSI: {t['rsi']}\n"
     msg += f"   • Vol: {t['vol']}\n"
     
     if t['squeeze'] != "None":
         msg += f"   • **Vol:** Squeeze Firing ({t['squeeze']}) 🚀\n"
         
-    msg += f"🎯 **Target:** {fmt_price(p['target'])} (~{p['days']} Days)\n"
-    msg += f"🛑 **Stop:** {fmt_price(p['stop'])}\n"
-    
-    # Only show options if directional
-    if "NEUTRAL" not in res['rec']:
-        msg += f"💡 **Options:** {o['strat']} ({o['expiry']})\n"
+    msg += f"\n🎯 Target: {fmt_price(res['plan']['target'])} (~{res['plan']['days']} Days)\n"
+    msg += f"🛑 Stop: {fmt_price(res['plan']['stop'])}\n"
     
     return msg + "\n"
 
@@ -304,7 +270,7 @@ if __name__ == "__main__":
     
     if power:
         msg = "🔥 *POWER RANKINGS*\n"
-        for r in power[:10]: msg += format_card(r)
+        for r in power[:10]: msg += format_card(r) # Top 10
         send_telegram(msg)
         
     print("DONE")

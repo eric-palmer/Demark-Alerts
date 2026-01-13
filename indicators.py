@@ -1,8 +1,9 @@
-# indicators.py - Verified Institutional Math
+# indicators.py - Verified Institutional Math (Index Fixed)
 import pandas as pd
 import numpy as np
 
 def sanitize(series):
+    """Replaces NaNs with 0"""
     return series.fillna(0)
 
 def calc_rsi(series, period=14):
@@ -21,13 +22,24 @@ def calc_squeeze(df):
         if len(df) < 20: return None
         sma = df['Close'].rolling(20).mean()
         std = df['Close'].rolling(20).std()
-        upper_bb = sma + (std * 2); lower_bb = sma - (std * 2)
-        tr = pd.concat([df['High']-df['Low'], abs(df['High']-df['Close'].shift()), abs(df['Low']-df['Close'].shift())], axis=1).max(axis=1)
+        upper_bb = sma + (std * 2)
+        lower_bb = sma - (std * 2)
+        
+        tr = pd.concat([
+            df['High'] - df['Low'],
+            abs(df['High'] - df['Close'].shift(1)),
+            abs(df['Low'] - df['Close'].shift(1))
+        ], axis=1).max(axis=1)
+        
         atr = tr.rolling(20).mean()
-        upper_kc = sma + (atr * 1.5); lower_kc = sma - (atr * 1.5)
+        upper_kc = sma + (atr * 1.5)
+        lower_kc = sma - (atr * 1.5)
+        
         in_squeeze = (lower_bb > lower_kc) & (upper_bb < upper_kc)
         if not in_squeeze.iloc[-1]: return None
-        y = df['Close'].iloc[-20:].values; x = np.arange(len(y))
+        
+        y = df['Close'].iloc[-20:].values
+        x = np.arange(len(y))
         slope = np.polyfit(x, y, 1)[0]
         return {'bias': "BULLISH" if slope > 0 else "BEARISH", 'tf': 'Daily'}
     except: return None
@@ -36,24 +48,45 @@ def calc_demark(df):
     try:
         df = df.copy()
         c = df['Close'].values
+        # Shift 4 bars back
         c_4 = np.roll(c, 4); c_4[:4] = c[:4] 
-        buy_setup = (c < c_4); sell_setup = (c > c_4)
-        def count(condition):
-            s = pd.Series(condition)
+        
+        # Boolean arrays (Numpy)
+        buy_cond = c < c_4
+        sell_cond = c > c_4
+        
+        # Helper to count consecutive True values
+        def count_consecutive(condition_array, index):
+            # Create Series WITH INDEX to ensure alignment
+            s = pd.Series(condition_array, index=index)
+            # Group by change in boolean value
             return s.groupby((s != s.shift()).cumsum()).cumsum() * s
-        df['Buy_Setup'] = count(buy_setup)
-        df['Sell_Setup'] = count(sell_setup)
-        last = len(df) - 1; perf = False
+            
+        # Assign back using strict index alignment
+        df['Buy_Setup'] = count_consecutive(buy_cond, df.index)
+        df['Sell_Setup'] = count_consecutive(sell_cond, df.index)
+        
+        # Perfection Check
+        last = len(df) - 1
+        perf = False
         if last > 10:
             if df['Buy_Setup'].iloc[-1] == 9:
                 lows = df['Low'].values
-                if (lows[last] < lows[last-2] and lows[last] < lows[last-3]) or (lows[last-1] < lows[last-2] and lows[last-1] < lows[last-3]): perf = True
+                # Buy Perf: Low 8 or 9 < Low 6 and 7
+                if (lows[last] < lows[last-2] and lows[last] < lows[last-3]) or \
+                   (lows[last-1] < lows[last-2] and lows[last-1] < lows[last-3]):
+                    perf = True
             elif df['Sell_Setup'].iloc[-1] == 9:
                 highs = df['High'].values
-                if (highs[last] > highs[last-2] and highs[last] > highs[last-3]) or (highs[last-1] > highs[last-2] and highs[last-1] > highs[last-3]): perf = True
+                # Sell Perf: High 8 or 9 > High 6 and 7
+                if (highs[last] > highs[last-2] and highs[last] > highs[last-3]) or \
+                   (highs[last-1] > highs[last-2] and highs[last-1] > highs[last-3]):
+                    perf = True
+                    
         df['Perfected'] = perf
         return df
-    except:
+    except Exception as e:
+        # print(f"DeMark Error: {e}")
         df['Buy_Setup'] = 0; df['Sell_Setup'] = 0; df['Perfected'] = False
         return df
 
@@ -69,14 +102,33 @@ def calc_shannon(df):
 
 def calc_adx(df, period=14):
     try:
-        up = df['High'].diff(); down = -df['Low'].diff()
-        p_dm = np.where((up > down) & (up > 0), up, 0)
-        m_dm = np.where((down > up) & (down > 0), down, 0)
-        tr = pd.concat([df['High']-df['Low'], abs(df['High']-df['Close'].shift()), abs(df['Low']-df['Close'].shift())], axis=1).max(axis=1)
+        # Calculate diffs (Pandas preserves index here)
+        up = df['High'].diff()
+        down = -df['Low'].diff()
+        
+        # Numpy 'where' loses index, so we must wrap it back in Series with index
+        p_dm = pd.Series(np.where((up > down) & (up > 0), up, 0), index=df.index)
+        m_dm = pd.Series(np.where((down > up) & (down > 0), down, 0), index=df.index)
+        
+        tr = pd.concat([
+            df['High']-df['Low'], 
+            abs(df['High']-df['Close'].shift()), 
+            abs(df['Low']-df['Close'].shift())
+        ], axis=1).max(axis=1)
+        
+        # Fix division by zero
+        tr = tr.replace(0, 0.0001)
+        
         atr = tr.ewm(alpha=1/period).mean()
-        p_di = 100 * (pd.Series(p_dm).ewm(alpha=1/period).mean() / atr)
-        m_di = 100 * (pd.Series(m_dm).ewm(alpha=1/period).mean() / atr)
+        
+        # Now these divisions align perfectly on the index
+        p_di = 100 * (p_dm.ewm(alpha=1/period).mean() / atr)
+        m_di = 100 * (m_dm.ewm(alpha=1/period).mean() / atr)
+        
         sum_di = (p_di + m_di).replace(0, 1)
         dx = 100 * abs(p_di - m_di) / sum_di
+        
         return sanitize(dx.ewm(alpha=1/period).mean())
-    except: return pd.Series([0]*len(df), index=df.index)
+    except Exception as e:
+        # print(f"ADX Error: {e}")
+        return pd.Series([0]*len(df), index=df.index)

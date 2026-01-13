@@ -1,4 +1,4 @@
-# indicators.py - Verified Institutional Math (Production Fix)
+# indicators.py - Verified Institutional Math (Complete)
 import pandas as pd
 import numpy as np
 
@@ -18,19 +18,17 @@ def calc_ma_trend(df):
         return {'sma50': z, 'sma200': z, 'ema8': z, 'ema21': z}
 
 def calc_trend_stack(df):
-    """Shannon Trend Stack"""
     try:
         c = df['Close']
         ema8 = c.ewm(span=8, adjust=False).mean()
         ema21 = c.ewm(span=21, adjust=False).mean()
         sma50 = c.rolling(50).mean()
-        
         last_c = c.iloc[-1]; last_8 = ema8.iloc[-1]
         last_21 = ema21.iloc[-1]; last_50 = sma50.iloc[-1]
         
         if last_c > last_8 > last_21 > last_50: status = "Strong Uptrend (Price > 8 > 21 > 50)"
         elif last_c < last_8 < last_21 < last_50: status = "Strong Downtrend (Price < 8 < 21 < 50)"
-        elif last_c > last_8: status = "Positive Momentum"
+        elif last_c > last_8: status = "Positive Momentum (Holding 8 EMA)"
         else: status = "No Trend (Wait)"
         return {'status': status}
     except: return {'status': "Data Error"}
@@ -74,27 +72,22 @@ def calc_squeeze(df):
     except: return None
 
 def calc_demark(df):
-    """Daily Setup Count"""
     try:
         df = df.copy()
         c = df['Close'].values
         buy_setup = np.zeros(len(c), dtype=int)
         sell_setup = np.zeros(len(c), dtype=int)
-        
         for i in range(4, len(c)):
             if c[i] < c[i-4]: buy_setup[i] = buy_setup[i-1] + 1
             else: buy_setup[i] = 0
             if c[i] > c[i-4]: sell_setup[i] = sell_setup[i-1] + 1
             else: sell_setup[i] = 0
-        
         last = len(c) - 1; perf = False
         l = df['Low'].values; h = df['High'].values
-        
         if buy_setup[last] >= 9:
             if (l[last] < l[last-2] and l[last] < l[last-3]) or (l[last-1] < l[last-2] and l[last-1] < l[last-3]): perf = True
         elif sell_setup[last] >= 9:
             if (h[last] > h[last-2] and h[last] > h[last-3]) or (h[last-1] > h[last-2] and h[last-1] > h[last-3]): perf = True
-                
         df['Buy_Setup'] = buy_setup
         df['Sell_Setup'] = sell_setup
         df['Perfected'] = perf
@@ -104,22 +97,13 @@ def calc_demark(df):
         return df
 
 def calc_demark_detailed(df):
-    """Institutional DeMark: Setup + Countdown"""
     try:
-        df = calc_demark(df) # Get basic setups first
-        c = df['Close'].values
-        l = df['Low'].values
-        h = df['High'].values
-        bs = df['Buy_Setup'].values
-        ss = df['Sell_Setup'].values
+        df = calc_demark(df)
+        c = df['Close'].values; l = df['Low'].values; h = df['High'].values
+        bs = df['Buy_Setup'].values; ss = df['Sell_Setup'].values
         
-        # Countdown 13 Logic
-        buy_countdown = 0
-        sell_countdown = 0
-        buy_active = False
-        sell_active = False
-        
-        # Scan last 100 bars
+        buy_countdown = 0; sell_countdown = 0
+        buy_active = False; sell_active = False
         start_idx = max(0, len(c) - 100)
         
         for i in range(start_idx, len(c)):
@@ -134,10 +118,7 @@ def calc_demark_detailed(df):
                 sell_countdown += 1
                 if sell_countdown == 13: sell_active = False
         
-        # Current Status
-        curr_bs = bs[-1]
-        curr_ss = ss[-1]
-        perf = df['Perfected'].iloc[-1]
+        curr_bs = bs[-1]; curr_ss = ss[-1]; perf = df['Perfected'].iloc[-1]
         
         if curr_bs > 0: return {'type': 'Buy', 'count': curr_bs, 'countdown': buy_countdown, 'perf': perf}
         elif curr_ss > 0: return {'type': 'Sell', 'count': curr_ss, 'countdown': sell_countdown, 'perf': perf}

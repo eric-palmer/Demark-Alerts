@@ -9,14 +9,14 @@ jobs:
   run-scanner:
     runs-on: ubuntu-latest
     
-    # --- GLOBAL ENVIRONMENT VARIABLES (Robust Fix) ---
-    # This loads the secrets for the ENTIRE job, guaranteeing Python sees them.
+    # --- GLOBAL ENVIRONMENT VARIABLES (The Fix) ---
+    # Defining them here ensures they exist for the entire job
     env:
       TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
-      # MAPS YOUR SECRET 'TELEGRAM_TOKEN' TO 'TELEGRAM_BOT_TOKEN'
+      # MAPS YOUR SECRET 'TELEGRAM_TOKEN' TO SCRIPT 'TELEGRAM_BOT_TOKEN'
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-    # -------------------------------------------------
+    # ----------------------------------------------
 
     steps:
     - name: Checkout code
@@ -32,5 +32,5 @@ jobs:
         pip install pandas numpy yfinance tiingo requests lxml
 
     - name: Run Trading Engine
-      # No 'env' needed here because we defined it globally above
+      # No need to repeat env here, it's already global
       run: python main.py

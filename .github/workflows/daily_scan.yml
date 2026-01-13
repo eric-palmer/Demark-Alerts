@@ -1,9 +1,9 @@
 name: Institutional Trading Scan
 
 on:
-  workflow_dispatch:  # Manual run button
+  workflow_dispatch:
   schedule:
-    - cron: '30 20 * * *' # Runs daily at 4:30 PM ET (adjust if needed)
+    - cron: '30 20 * * *'
 
 jobs:
   run-scanner:
@@ -16,7 +16,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.11' # Optimized for Math/Data speeds
+        python-version: '3.11'
 
     - name: Install dependencies
       run: |
@@ -24,8 +24,9 @@ jobs:
 
     - name: Run Trading Engine
       env:
+        # --- THIS IS THE PART YOU WERE MISSING ---
         TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
-        FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        # -----------------------------------------
       run: python main.py

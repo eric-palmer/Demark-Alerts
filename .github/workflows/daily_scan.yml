@@ -1,10 +1,9 @@
 name: Institutional Trading Scan
 
 on:
+  workflow_dispatch:  # Manual run button
   schedule:
-    # Runs at 21:00 UTC (4:00 PM EST) every weekday
-    - cron: '0 21 * * 1-5'
-  workflow_dispatch: # This lets you click a button to run it manually
+    - cron: '30 20 * * 1-5' # Runs at 4:30 PM ET (adjust as needed)
 
 jobs:
   run-scanner:
@@ -17,16 +16,19 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.11'
+        python-version: '3.9'
 
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install pandas numpy yfinance tiingo requests lxml
 
     - name: Run Trading Engine
       env:
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        # --- THIS SECTION IS CRITICAL ---
+        # It maps the GitHub Secret to the Python Environment
+        TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
         FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        # --------------------------------
       run: python main.py

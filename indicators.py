@@ -1,17 +1,22 @@
-# indicators.py - Verified Institutional Math (Fixed Keys)
+# indicators.py - Verified Institutional Math (Fixed)
 import pandas as pd
 import numpy as np
 
 def sanitize(series):
     return series.fillna(0)
 
-# --- DEMARK LOGIC (Fixed) ---
+# --- DEMARK LOGIC (Crash-Proof) ---
 def calc_demark_detailed(df):
+    # Initialize Default Result (Safe Fallback)
+    res = {
+        'type': 'Neutral', 'count': 0, 'countdown': 0, 
+        'perf': False, 'is_9': False, 'is_13': False
+    }
+    
     try:
-        c = df['Close'].values
-        l = df['Low'].values
-        h = df['High'].values
-        
+        c = df['Close'].values; l = df['Low'].values; h = df['High'].values
+        if len(c) < 20: return res # Not enough data
+
         # 1. SETUP (9)
         bs = np.zeros(len(c), dtype=int)
         ss = np.zeros(len(c), dtype=int)
@@ -47,25 +52,18 @@ def calc_demark_detailed(df):
 
         bs_curr = bs[-1]; ss_curr = ss[-1]
         
-        # RESULT DICTIONARY (Standardized Keys)
-        res = {
-            'type': 'Neutral', 'count': 0, 'countdown': 0, 'perf': False, 
-            'is_9': False, 'is_13': False
-        }
-        
         if bs_curr > 0:
             res.update({'type': 'Buy', 'count': bs_curr, 'countdown': b_cnt, 'perf': perf})
         elif ss_curr > 0:
             res.update({'type': 'Sell', 'count': ss_curr, 'countdown': s_cnt, 'perf': perf})
             
-        # Set flags
+        # Set Flags
         if res['count'] == 9: res['is_9'] = True
         if res['countdown'] == 13: res['is_13'] = True
         
         return res
 
-    except: 
-        return {'type': 'Error', 'count': 0, 'countdown': 0, 'perf': False, 'is_9': False, 'is_13': False}
+    except: return res
 
 # --- STANDARD INDICATORS ---
 def calc_ma_trend(df):

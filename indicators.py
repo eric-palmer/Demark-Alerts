@@ -1,4 +1,4 @@
-# indicators.py - Verified Institutional Math (Fixed)
+# indicators.py - Verified Institutional Math (Production Fix)
 import pandas as pd
 import numpy as np
 
@@ -10,7 +10,6 @@ def calc_ma_trend(df):
     try:
         sma50 = df['Close'].rolling(50).mean()
         sma200 = df['Close'].rolling(200).mean()
-        # Exponential (for Shannon)
         ema8 = df['Close'].ewm(span=8, adjust=False).mean()
         ema21 = df['Close'].ewm(span=21, adjust=False).mean()
         return {'sma50': sma50, 'sma200': sma200, 'ema8': ema8, 'ema21': ema21}
@@ -19,7 +18,7 @@ def calc_ma_trend(df):
         return {'sma50': z, 'sma200': z, 'ema8': z, 'ema21': z}
 
 def calc_trend_stack(df):
-    """Brian Shannon's Trend Stack"""
+    """Shannon Trend Stack"""
     try:
         c = df['Close']
         ema8 = c.ewm(span=8, adjust=False).mean()
@@ -31,9 +30,8 @@ def calc_trend_stack(df):
         
         if last_c > last_8 > last_21 > last_50: status = "Strong Uptrend (Price > 8 > 21 > 50)"
         elif last_c < last_8 < last_21 < last_50: status = "Strong Downtrend (Price < 8 < 21 < 50)"
-        elif last_c > last_8: status = "Positive Momentum (Holding 8 EMA)"
+        elif last_c > last_8: status = "Positive Momentum"
         else: status = "No Trend (Wait)"
-            
         return {'status': status}
     except: return {'status': "Data Error"}
 
@@ -76,41 +74,26 @@ def calc_squeeze(df):
     except: return None
 
 def calc_demark(df):
-    """
-    Standard DeMark Setup (9) Logic
-    Matches your diagnostic script exactly.
-    """
+    """Daily Setup Count"""
     try:
         df = df.copy()
         c = df['Close'].values
-        # Initialize arrays
         buy_setup = np.zeros(len(c), dtype=int)
         sell_setup = np.zeros(len(c), dtype=int)
         
-        # Loop (The proven method from your test)
         for i in range(4, len(c)):
-            if c[i] < c[i-4]:
-                buy_setup[i] = buy_setup[i-1] + 1
-            else:
-                buy_setup[i] = 0
-                
-            if c[i] > c[i-4]:
-                sell_setup[i] = sell_setup[i-1] + 1
-            else:
-                sell_setup[i] = 0
+            if c[i] < c[i-4]: buy_setup[i] = buy_setup[i-1] + 1
+            else: buy_setup[i] = 0
+            if c[i] > c[i-4]: sell_setup[i] = sell_setup[i-1] + 1
+            else: sell_setup[i] = 0
         
-        # Perfection Check (Current Bar)
-        last = len(c) - 1
-        perf = False
-        l = df['Low'].values
-        h = df['High'].values
+        last = len(c) - 1; perf = False
+        l = df['Low'].values; h = df['High'].values
         
         if buy_setup[last] >= 9:
-            if (l[last] < l[last-2] and l[last] < l[last-3]) or (l[last-1] < l[last-2] and l[last-1] < l[last-3]): 
-                perf = True
+            if (l[last] < l[last-2] and l[last] < l[last-3]) or (l[last-1] < l[last-2] and l[last-1] < l[last-3]): perf = True
         elif sell_setup[last] >= 9:
-            if (h[last] > h[last-2] and h[last] > h[last-3]) or (h[last-1] > h[last-2] and h[last-1] > h[last-3]): 
-                perf = True
+            if (h[last] > h[last-2] and h[last] > h[last-3]) or (h[last-1] > h[last-2] and h[last-1] > h[last-3]): perf = True
                 
         df['Buy_Setup'] = buy_setup
         df['Sell_Setup'] = sell_setup
@@ -119,6 +102,48 @@ def calc_demark(df):
     except:
         df['Buy_Setup'] = 0; df['Sell_Setup'] = 0; df['Perfected'] = False
         return df
+
+def calc_demark_detailed(df):
+    """Institutional DeMark: Setup + Countdown"""
+    try:
+        df = calc_demark(df) # Get basic setups first
+        c = df['Close'].values
+        l = df['Low'].values
+        h = df['High'].values
+        bs = df['Buy_Setup'].values
+        ss = df['Sell_Setup'].values
+        
+        # Countdown 13 Logic
+        buy_countdown = 0
+        sell_countdown = 0
+        buy_active = False
+        sell_active = False
+        
+        # Scan last 100 bars
+        start_idx = max(0, len(c) - 100)
+        
+        for i in range(start_idx, len(c)):
+            if bs[i] == 9: buy_active = True; buy_countdown = 0
+            if ss[i] == 9: sell_active = True; sell_countdown = 0
+            
+            if buy_active and i >= 2 and c[i] <= l[i-2]:
+                buy_countdown += 1
+                if buy_countdown == 13: buy_active = False
+            
+            if sell_active and i >= 2 and c[i] >= h[i-2]:
+                sell_countdown += 1
+                if sell_countdown == 13: sell_active = False
+        
+        # Current Status
+        curr_bs = bs[-1]
+        curr_ss = ss[-1]
+        perf = df['Perfected'].iloc[-1]
+        
+        if curr_bs > 0: return {'type': 'Buy', 'count': curr_bs, 'countdown': buy_countdown, 'perf': perf}
+        elif curr_ss > 0: return {'type': 'Sell', 'count': curr_ss, 'countdown': sell_countdown, 'perf': perf}
+        
+        return {'type': 'Neutral', 'count': 0, 'countdown': 0, 'perf': False}
+    except: return {'type': 'Error', 'count': 0, 'countdown': 0, 'perf': False}
 
 def calc_shannon(df):
     try:
@@ -133,20 +158,15 @@ def calc_shannon(df):
 def calc_adx(df, period=14):
     try:
         up = df['High'].diff(); down = -df['Low'].diff()
-        # Use Numpy where but wrap in Series to keep index
         p_dm = pd.Series(np.where((up > down) & (up > 0), up, 0), index=df.index)
         m_dm = pd.Series(np.where((down > up) & (down > 0), down, 0), index=df.index)
-        
         tr = pd.concat([df['High']-df['Low'], abs(df['High']-df['Close'].shift()), abs(df['Low']-df['Close'].shift())], axis=1).max(axis=1)
         tr = tr.replace(0, 0.0001)
-        
         atr = tr.ewm(alpha=1/period, min_periods=period).mean()
         p_di = 100 * (p_dm.ewm(alpha=1/period, min_periods=period).mean() / atr)
         m_di = 100 * (m_dm.ewm(alpha=1/period, min_periods=period).mean() / atr)
-        
         dx = 100 * abs(p_di - m_di) / (p_di + m_di)
-        # Using simple mean for smoother ADX curve like TradingView
-        return sanitize(dx.rolling(window=period).mean()) 
+        return sanitize(dx.rolling(window=period).mean())
     except: return pd.Series([0]*len(df), index=df.index)
 
 def calc_hv(df):

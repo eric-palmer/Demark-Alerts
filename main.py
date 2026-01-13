@@ -22,14 +22,19 @@ SHORT_WATCHLIST = ['LAC', 'IBIT', 'ETHA', 'SPY', 'QQQ']
 
 def check_env():
     """Double check secrets before starting"""
-    missing = []
-    if not os.environ.get('TIINGO_API_KEY'): missing.append('TIINGO_API_KEY')
-    if not os.environ.get('TELEGRAM_BOT_TOKEN'): missing.append('TELEGRAM_BOT_TOKEN')
-    if not os.environ.get('TELEGRAM_CHAT_ID'): missing.append('TELEGRAM_CHAT_ID')
+    print("🔍 DEBUGGING ENVIRONMENT VARIABLES:")
     
-    if missing:
-        print(f"❌ CRITICAL: Missing Secrets in Environment: {', '.join(missing)}")
-        print("   -> Verify your .github/workflows/daily_scan.yml file maps them correctly.")
+    tiingo = os.environ.get('TIINGO_API_KEY')
+    bot = os.environ.get('TELEGRAM_BOT_TOKEN')
+    chat = os.environ.get('TELEGRAM_CHAT_ID')
+    
+    print(f"   - TIINGO KEY: {'✅ Found' if tiingo else '❌ MISSING'}")
+    print(f"   - BOT TOKEN:  {'✅ Found' if bot else '❌ MISSING'}")
+    print(f"   - CHAT ID:    {'✅ Found' if chat else '❌ MISSING'}")
+
+    if not tiingo or not bot or not chat:
+        print("❌ CRITICAL: Secrets are not passing to the script.")
+        print("   -> Check daily_scan.yml indentation and mapping.")
         return False
     return True
 
@@ -189,7 +194,6 @@ if __name__ == "__main__":
             res = future.result()
             if res: results.append(res)
             
-    # 3. REPORT
     results.sort(key=lambda x: x['ticker'] in CURRENT_PORTFOLIO, reverse=True)
     
     if results:

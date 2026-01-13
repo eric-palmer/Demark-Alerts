@@ -3,7 +3,7 @@ name: Institutional Trading Scan
 on:
   workflow_dispatch:  # Manual run button
   schedule:
-    - cron: '30 20 * * 1-5' # Runs at 4:30 PM ET (adjust as needed)
+    - cron: '30 20 * * *' # Runs daily at 4:30 PM ET (adjust if needed)
 
 jobs:
   run-scanner:
@@ -16,7 +16,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
+        python-version: '3.11' # Optimized for Math/Data speeds
 
     - name: Install dependencies
       run: |
@@ -24,11 +24,8 @@ jobs:
 
     - name: Run Trading Engine
       env:
-        # --- THIS SECTION IS CRITICAL ---
-        # It maps the GitHub Secret to the Python Environment
         TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
         FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        # --------------------------------
       run: python main.py

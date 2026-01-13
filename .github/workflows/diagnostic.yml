@@ -1,10 +1,9 @@
-name: Run Data Diagnostic
+name: Run Logic Test
 
-on:
-  workflow_dispatch: # Manual button only
+on: workflow_dispatch
 
 jobs:
-  test-data:
+  test-logic:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -16,9 +15,9 @@ jobs:
         python-version: '3.11'
 
     - name: Install dependencies
-      run: pip install pandas tiingo
+      run: pip install pandas tiingo numpy
 
-    - name: Run Diagnostic
+    - name: Run Test Logic
       env:
         TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
-      run: python diagnose.py
+      run: python test_logic.py

@@ -1,4 +1,4 @@
-# main.py - Institutional Engine (Multi-Desk Final)
+# main.py - Institutional Engine (Clean & Detailed)
 import time
 import pandas as pd
 import numpy as np
@@ -6,7 +6,7 @@ import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from data_fetcher import safe_download, get_macro, get_tiingo_client
-from indicators import (calc_rsi, calc_squeeze, calc_demark_detailed, 
+from indicators import (calc_rsi, calc_squeeze, calc_demark, 
                         calc_shannon, calc_adx, calc_ma_trend, 
                         calc_macd, calc_trend_stack, calc_rvol, calc_donchian, calc_hv)
 from utils import send_telegram, fmt_price
@@ -65,6 +65,20 @@ def get_market_radar_regime(macro):
             else: return "STAGFLATION", "Risk Off (Cash/Shorts)"
     except: return "NEUTRAL", "Calc Error"
 
+def get_demark_status(df):
+    """Helper to extract DeMark status"""
+    try:
+        last = df.iloc[-1]
+        bs = last.get('Buy_Setup', 0); ss = last.get('Sell_Setup', 0)
+        count = safe_int(bs if bs > ss else ss)
+        setup_type = "Buy" if bs > ss else "Sell"
+        perf = last.get('Perfected', False)
+        return {
+            'type': setup_type, 'count': count, 
+            'perf': perf, 'is_9': (count == 9), 'is_13': (count == 13)
+        }
+    except: return {'type': 'None', 'count': 0, 'perf': False, 'is_9': False, 'is_13': False}
+
 def analyze_ticker(ticker, regime, detailed=False):
     try:
         client = get_tiingo_client()
@@ -75,9 +89,9 @@ def analyze_ticker(ticker, regime, detailed=False):
             last_vol = df['Volume'].iloc[-5:].mean() * df['Close'].iloc[-1]
             if last_vol < 500000: return None 
 
-        # --- INDICATORS ---
+        # --- CALCULATIONS ---
         df['RSI'] = calc_rsi(df['Close'])
-        dm_daily = calc_demark_detailed(df)
+        df = calc_demark(df)
         sq_res = calc_squeeze(df)
         shannon = calc_shannon(df)
         adx = calc_adx(df)
@@ -89,116 +103,113 @@ def analyze_ticker(ticker, regime, detailed=False):
         
         last = df.iloc[-1]
         price = last['Close']
+        
         atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
         if pd.isna(atr): atr = price * 0.02
 
-        # --- WEEKLY (4 Year History) ---
-        dm_weekly = {'type': 'Neutral', 'count': 0}
+        # --- WEEKLY (Corrected Logic) ---
+        weekly_txt = "Neutral"
         if detailed:
             try:
-                df_w = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
-                dm_weekly = calc_demark_detailed(df_w)
+                # Proper Weekly Resampling
+                df_w = df.resample('W-FRI').agg({
+                    'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+                }).dropna()
+                df_w = calc_demark(df_w)
+                w_dm = get_demark_status(df_w)
+                
+                if w_dm['count'] > 0:
+                    context = "Setup"
+                    if w_dm['count'] >= 8: context = "Near Exhaustion"
+                    if w_dm['is_9']: context = "REVERSAL SIGNAL"
+                    weekly_txt = f"{w_dm['type']} {w_dm['count']} ({context})"
             except: pass
 
-        # --- SCORING & BIAS ---
+        # --- SCORING & INTERPRETATION ---
         score = 0
         
-        # 1. Trend
+        # 1. Trend (200d)
         sma200 = ma['sma200'].iloc[-1]
-        if sma200 > 0:
-            lt_bias = "Bullish (Above 200d)" if price > sma200 else "Bearish (Below 200d)"
-            score += 2 if "Bull" in lt_bias else -2
-        else: lt_bias = "Unknown (New Asset)"
-            
-        # 2. Momentum
+        lt_bias = "Bullish (Above 200d)" if price > sma200 else "Bearish (Below 200d)"
+        score += 2 if "Bull" in lt_bias else -2
+        
+        # 2. Medium Term (MACD)
         macd_val = macd_data['macd'].iloc[-1]
         macd_sig = macd_data['signal'].iloc[-1]
-        mt_bias = "Positive" if macd_val > macd_sig else "Negative"
-        score += 1 if "Pos" in mt_bias else -1
+        mt_bias = "Positive Momentum" if macd_val > macd_sig else "Negative Momentum"
+        score += 1 if macd_val > macd_sig else -1
         
-        # 3. DeMark (Short Term)
+        # 3. Short Term (DeMark/RSI)
+        daily_dm = get_demark_status(df)
         st_bias = "Neutral"
-        if dm_daily['count'] == 9:
-            st_bias = "Reversal Setup (9)"
-            score += 3 if dm_daily['type'] == 'Buy' else -3
-        elif dm_daily['countdown'] == 13:
-            st_bias = "Trend Exhaustion (13)"
-            score += 4 if dm_daily['type'] == 'Buy' else -4
+        
+        if daily_dm['is_9']:
+            st_bias = f"{daily_dm['type']} Exhaustion"
+            score += 3 if daily_dm['type'] == 'Buy' else -3
+        elif daily_dm['count'] > 0:
+            st_bias = f"{daily_dm['type']} {daily_dm['count']} (Building)"
             
-        # 4. RSI
         rsi_val = last['RSI']
         if rsi_val > 70: score -= 2; st_bias = "Overbought"
         elif rsi_val < 30: score += 2; st_bias = "Oversold"
         
         if sq_res: score += 2 if sq_res['bias'] == "BULLISH" else -2
-        if shannon['breakout']: score += 3
 
-        if rvol > 1.5: score = score * 1.2
-
-        # --- TARGETS ---
-        if score > 0: 
-            target = struct['high'] if struct['high'] > price else price + (atr * 3)
-            stop = struct['low'] if struct['low'] < price else price - (atr * 1.5)
-        else:
-            target = struct['low'] if struct['low'] < price else price - (atr * 3)
-            stop = struct['high'] if struct['high'] > price else price + (atr * 1.5)
-            
-        dist = abs(target - price)
-        daily_move = atr * 0.8 
-        days = max(1, int(dist / daily_move))
-
-        # --- TEXT FORMATTING ---
+        # --- FINAL VERDICT ---
         rec = "⚪ NEUTRAL"
         if score >= 4: rec = "🟢 STRONG BUY"
         elif score >= 2: rec = "🟢 BUY"
         elif score <= -4: rec = "🔴 STRONG SHORT"
         elif score <= -2: rec = "🔴 SHORT"
 
-        # DeMark English
-        dm_d_txt = f"{dm_daily['type']} {dm_daily['count']}"
-        if dm_daily['count'] == 9: dm_d_txt += f" ({'PERFECTED' if dm_daily['perf'] else 'UNPERFECTED'})"
-        if dm_daily['countdown'] > 0: dm_d_txt += f" (Countdown: {dm_daily['countdown']}/13)"
-        
-        dm_w_txt = f"{dm_weekly['type']} {dm_weekly['count']}"
-        if dm_weekly['count'] == 9: dm_w_txt += " (Setup Complete)"
-
         adx_val = adx.iloc[-1]
-        adx_txt = "Trending" if adx_val > 25 else "No Trend"
+        adx_txt = "Strong Trend" if adx_val > 25 else "No Trend (Wait)"
+        
+        # Targets
+        if score > 0: 
+            target = price + (atr * 3)
+            stop = price - (atr * 1.5)
+        else:
+            target = price - (atr * 3)
+            stop = price + (atr * 1.5)
+            
+        dist = abs(target - price)
+        daily_move = atr * 0.8 
+        days = max(1, int(dist / daily_move))
 
         return {
             'ticker': ticker, 'price': price, 'score': round(score, 1), 'rec': rec,
             'horizons': {'short': st_bias, 'med': mt_bias, 'long': lt_bias},
             'techs': {
-                'demark_d': dm_d_txt,
-                'demark_w': dm_w_txt,
+                'demark': f"{daily_dm['type']} {daily_dm['count']}",
+                'weekly': weekly_txt,
                 'rsi': f"{rsi_val:.1f} ({'Oversold' if rsi_val<30 else ('Overbought' if rsi_val>70 else 'Neutral')})",
                 'adx': f"{adx_val:.1f} ({adx_txt})",
                 'stack': stack['status'],
                 'vol': f"{rvol:.1f}x",
-                'squeeze': sq_res['bias'] if sq_res else "None",
-                'dm_obj': dm_daily # Object for filtering
+                'squeeze': sq_res['bias'] if sq_res else "None"
             },
             'plan': {'target': target, 'stop': stop, 'days': days}
         }
     except: return None
 
-def format_card(res, simple=False):
+def format_card(res):
     t = res['techs']
     msg = f"═════════════════════════\n"
     msg += f"*{res['ticker']}* @ {fmt_price(res['price'])}\n"
     msg += f"**{res['rec']}** ({res['score']})\n\n"
     
-    if not simple:
-        msg += f"🕰️ **Outlook:**\n"
-        msg += f"   • Short: {res['horizons']['short']}\n"
-        msg += f"   • Med:   {res['horizons']['med']}\n"
-        msg += f"   • Long:  {res['horizons']['long']}\n\n"
+    # Clean Layout (No lines inside)
+    msg += f"🕰️ **Outlook:**\n"
+    msg += f"   • Short: {res['horizons']['short']}\n"
+    msg += f"   • Med:   {res['horizons']['med']}\n"
+    msg += f"   • Long:  {res['horizons']['long']}\n\n"
     
-    msg += f"📊 **Vitals:**\n"
-    msg += f"   • Trend: {t['stack']}\n"
-    msg += f"   • DeMark (D): {t['demark_d']}\n"
-    if not simple: msg += f"   • DeMark (W): {t['demark_w']}\n"
+    msg += f"📊 **Technicals:**\n"
+    msg += f"   • DeMark (D): {t['demark']}\n"
+    msg += f"   • DeMark (W): {t['weekly']}\n"
     msg += f"   • RSI: {t['rsi']}\n"
+    msg += f"   • Trend: {t['adx']}\n"
     
     if t['squeeze'] != "None":
         msg += f"   • **Vol:** Squeeze Firing ({t['squeeze']}) 🚀\n"
@@ -231,13 +242,14 @@ if __name__ == "__main__":
             
     results.sort(key=lambda x: x['ticker'] in CURRENT_PORTFOLIO, reverse=True)
     
-    msg = "💼 *PORTFOLIO & WATCHLIST*\n"
-    for r in results: msg += format_card(r)
+    msg = "💼 *PORTFOLIO & WATCHLIST*\n═════════════════════════\n"
+    for r in results:
+        msg += format_card(r)
     send_telegram(msg)
 
-    # 2. SAMPLER (Test Mode - Switch to Full when ready)
+    # 2. SAMPLER SCAN
     others = [t for t in STRATEGIC_TICKERS if t not in priority_list]
-    scan_batch = random.sample(others, 5) 
+    scan_batch = random.sample(others, 5)
     
     print("Scanning Sample Batch...")
     scan_results = []
@@ -247,28 +259,10 @@ if __name__ == "__main__":
             res = future.result()
             if res: scan_results.append(res)
             
-    # --- DESKS ---
-    
-    # Power Rankings
     power = [r for r in scan_results if abs(r['score']) >= 4]
     if power:
-        msg = "🔥 *POWER RANKINGS*\n"
-        for r in power: msg += format_card(r)
+        msg = "🔥 *POWER RANKINGS*\n═════════════════════════\n"
+        for r in power[:10]: msg += format_card(r)
         send_telegram(msg)
         
-    # DeMark Desk (Any 9s or 13s not in Power)
-    dm_desk = [r for r in scan_results if (r['techs']['dm_obj']['count'] == 9 or r['techs']['dm_obj']['countdown'] == 13) and r not in power]
-    if dm_desk:
-        msg = "🔢 *DEMARK DESK (Signals)*\n"
-        for r in dm_desk: msg += format_card(r, simple=True)
-        send_telegram(msg)
-        
-    # RSI Desk
-    rsi_desk = [r for r in scan_results if ("Over" in r['techs']['rsi']) and r not in power and r not in dm_desk]
-    if rsi_desk:
-        msg = "🌊 *RSI EXTREMES*\n"
-        for r in rsi_desk: msg += format_card(r, simple=True)
-        send_telegram(msg)
-        
-    print("🛑 SAMPLE COMPLETE. Exiting.")
-    exit()
+    print("DONE")

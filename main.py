@@ -1,4 +1,4 @@
-# main.py - Institutional Engine (Crash Fixed)
+# main.py - Institutional Engine (Deep Indicator Inspection)
 import time
 import pandas as pd
 import numpy as np
@@ -38,30 +38,24 @@ STRATEGIC_TICKERS = [
     'DNA', 'TWST', 'GLW', 'KHC', 'LULU', 'YETI', 'DLR', 'EQIX', 'ORCL', 'LSF'
 ]
 
-# --- CRITICAL FIX: Safe Integer Converter ---
 def safe_int(val):
-    """Prevents crash when converting NaN to int"""
     try:
         if pd.isna(val) or val is None: return 0
         return int(float(val))
     except: return 0
 
 def get_market_radar_regime(macro):
-    """Calculates Regime safely"""
     try:
         growth = macro.get('growth')
         inflation = macro.get('inflation')
-        
         if growth is None or inflation is None:
             if macro.get('net_liq') is not None:
                 nl = macro['net_liq']
                 if len(nl) > 63 and nl.iloc[-1] > nl.iloc[-63]:
                     return "LIQUIDITY EXPANSION", "Fed Adding Liquidity (Growth Data Missing)"
             return "NEUTRAL", "Macro Data Unavailable"
-            
         g_impulse = growth.pct_change(3).iloc[-1]
         i_impulse = inflation.pct_change(63).iloc[-1]
-        
         if g_impulse > 0:
             if i_impulse < 0: return "RISK_ON", "GOLDILOCKS (Growth ⬆️ Inf ⬇️)"
             else: return "REFLATION", "HEATING UP (Growth ⬆️ Inf ⬆️)"
@@ -76,16 +70,16 @@ def analyze_ticker(ticker, regime):
         df = safe_download(ticker, client)
         if df is None: return None
 
-        # Filter Illiquid
         if '=F' not in ticker and '-USD' not in ticker:
             last_vol = df['Volume'].iloc[-5:].mean() * df['Close'].iloc[-1]
             if last_vol < 500000: return None 
 
+        # --- CALCULATE INDICATORS ---
         df['RSI'] = calc_rsi(df['Close'])
         df = calc_demark(df)
         sq_res = calc_squeeze(df)
         shannon = calc_shannon(df)
-        adx = calc_adx(df)
+        df['ADX'] = calc_adx(df) # Save to column for inspection
         
         last = df.iloc[-1]
         price = last['Close']
@@ -96,10 +90,24 @@ def analyze_ticker(ticker, regime):
         atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
         if pd.isna(atr): atr = price * 0.02
         
+        # --- DEEP INSPECTION LOGGING (SLV) ---
+        if ticker == 'SLV':
+            print("\n" + "="*40)
+            print(f"🔎 INSPECTING INDICATORS: {ticker}")
+            print(f"   Last Price: {price}")
+            print(f"   Column Check: {list(df.columns)}")
+            print("\n   LAST 5 DAYS DATA:")
+            print(df[['High', 'Low', 'Close', 'ADX', 'Buy_Setup', 'Sell_Setup']].tail(5))
+            print("\n   ADX RAW CALC CHECK:")
+            # Manual check of ranges
+            tr_check = (df['High'] - df['Low']).tail(5)
+            print(f"   High-Low Ranges:\n{tr_check}")
+            print("="*40 + "\n")
+        # -------------------------------------
+
         setup = {'active': False, 'msg': "None", 'target': 0, 'stop': 0, 'time': ''}
         score = 0
         
-        # DeMark Logic
         bs = last.get('Buy_Setup', 0); ss = last.get('Sell_Setup', 0)
         
         if bs == 9:
@@ -111,13 +119,11 @@ def analyze_ticker(ticker, regime):
             score += 3 if perf else 2
             setup = {'active': True, 'msg': f"DeMark SELL 9 {'(Perfected)' if perf else ''}", 'target': price-(atr*3), 'stop': price+(atr*1.5), 'time': '1-4 Weeks'}
             
-        # Squeeze Logic
         if sq_res and not setup['active']:
             score += 2
             d = sq_res['bias']
             setup = {'active': True, 'msg': f"TTM Squeeze ({d})", 'target': price+(atr*4) if d=="BULLISH" else price-(atr*4), 'stop': price-(atr*2) if d=="BULLISH" else price+(atr*2), 'time': '3-10 Days'}
             
-        # RSI Logic
         if last['RSI'] < 30: 
             score += 2
             if not setup['active']: setup = {'active': True, 'msg': "RSI Oversold", 'target': price+(atr*2), 'stop': price-atr, 'time': '1-3 Days'}
@@ -133,15 +139,16 @@ def analyze_ticker(ticker, regime):
             elif trend == "BEARISH": setup['msg'] = "Trend: Bearish Avoid"
             else: setup['msg'] = "Trend: Neutral"
         
-        # Calculate final counts safely
         cnt = bs if bs > ss else ss
         
         return {
             'ticker': ticker, 'price': price, 'trend': trend, 'score': score,
             'setup': setup, 'squeeze': sq_res, 'shannon': shannon, 
-            'rsi': last['RSI'], 'adx': adx.iloc[-1], 'demark_count': cnt
+            'rsi': last['RSI'], 'adx': last['ADX'], 'demark_count': cnt
         }
-    except: return None
+    except Exception as e:
+        print(f"Error {ticker}: {e}")
+        return None
 
 def format_portfolio_card(res):
     icon = "🟢" if res['trend'] == "BULLISH" else "🔴"
@@ -153,7 +160,6 @@ def format_portfolio_card(res):
     msg += f"Score: {res['score']}/10 | ADX: {adx_val:.1f}\n"
     msg += f"────────────────\n"
     
-    # CRITICAL FIX: Safe Int prevents crash on NaNs
     dm_c = safe_int(res.get('demark_count', 0))
     msg += f"• **DeMark:** Count {dm_c}\n"
     
@@ -186,22 +192,11 @@ def format_scanner_alert(res):
 if __name__ == "__main__":
     print("="*60); print("INSTITUTIONAL BATCH SCANNER"); print("="*60)
     
-    full_list = list(set(CURRENT_PORTFOLIO + STRATEGIC_TICKERS))
-    for t in CURRENT_PORTFOLIO:
-        if t in full_list: full_list.remove(t)
-    full_list = CURRENT_PORTFOLIO + full_list
-    
-    batches = [full_list[i:i + BATCH_SIZE] for i in range(0, len(full_list), BATCH_SIZE)]
-    est_time = (len(batches) - 1) * 61
-    
-    send_telegram(f"🏗️ *SCAN STARTED*\nAssets: {len(full_list)}\nBatches: {len(batches)}\nEst. Time: {est_time} mins")
-
     try:
         macro = get_macro()
         regime, desc = get_market_radar_regime(macro)
     except:
         regime = "NEUTRAL"; desc = "Macro Data Failed"
-        
     send_telegram(f"📊 *MARKET REGIME: {regime}*\n{desc}")
 
     print("Scanning Portfolio...")
@@ -217,7 +212,5 @@ if __name__ == "__main__":
         port_msg += format_portfolio_card(r)
     send_telegram(port_msg)
 
-    # --- DEBUG EXIT: Remove this to run full scan ---
-    print("🛑 DEBUG: Stopping after portfolio for fast feedback.")
+    print("🛑 DEBUG STOP: Checking logs.")
     exit()
-    # -----------------------------------------------

@@ -1,4 +1,4 @@
-# data_fetcher.py - Institutional Data (X-Ray Matched)
+# data_fetcher.py - Institutional Data (Adjusted Priority)
 import pandas as pd
 import time
 import os
@@ -12,6 +12,30 @@ def get_tiingo_client():
     api_key = os.environ.get('TIINGO_API_KEY')
     return TiingoClient({'api_key': api_key, 'session': True}) if api_key else None
 
+def standardize_columns(df):
+    """Maps Adjusted Columns to Standard Names"""
+    df.columns = [c.lower() for c in df.columns]
+    
+    final_df = pd.DataFrame(index=df.index)
+    
+    # Priority: Adjusted (Matches your $72 SLV price)
+    mapping = {
+        'Open': 'adjopen', 'High': 'adjhigh', 'Low': 'adjlow', 'Close': 'adjclose', 'Volume': 'adjvolume'
+    }
+    raw_mapping = {
+        'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'
+    }
+    
+    for target, adj_col in mapping.items():
+        if adj_col in df.columns:
+            final_df[target] = df[adj_col]
+        elif raw_mapping[target] in df.columns:
+            final_df[target] = df[raw_mapping[target]]
+        else:
+            final_df[target] = 0.0 # Safety fill
+            
+    return final_df
+
 def fetch_tiingo(ticker, client):
     try:
         start_date = (datetime.datetime.now() - datetime.timedelta(days=730)).strftime('%Y-%m-%d')
@@ -20,46 +44,33 @@ def fetch_tiingo(ticker, client):
             sym = ticker.replace('-USD', '').lower() + 'usd'
             data = client.get_crypto_price_history(tickers=[sym], startDate=start_date, resampleFreq='1day')
             df = pd.DataFrame(data[0].get('priceData', []))
-            rename = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
-            df = df.rename(columns=rename)
+            df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
+            df = df.set_index('date')
         else:
             df = client.get_dataframe(ticker, startDate=start_date)
-            # CRITICAL: Map 'adjHigh' to 'High' based on X-Ray
-            if 'adjClose' in df.columns:
-                df = df[['adjOpen', 'adjHigh', 'adjLow', 'adjClose', 'adjVolume']]
-                df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-            else:
-                df = df[['open', 'high', 'low', 'close', 'volume']]
-                df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+            df.index = df.index.tz_localize(None)
 
-        df['Date'] = pd.to_datetime(df.index).tz_localize(None)
-        df = df.set_index('Date')
+        df = standardize_columns(df)
         
         for c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
             
         return df.interpolate(method='time').ffill().bfill()
-    except Exception:
-        return None
+    except: return None
 
 def fetch_fallback(ticker):
     try:
         dat = yf.Ticker(ticker)
         df = dat.history(period="2y", auto_adjust=True)
         if df.empty: return None
-        
         df = df.reset_index()
-        df.columns = [c.lower() for c in df.columns]
-        rename = {'date': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
-        df = df.rename(columns=rename)
+        if 'Date' in df.columns: df = df.set_index('Date')
+        elif 'date' in df.columns: df = df.set_index('date')
+        df.index = pd.to_datetime(df.index).tz_localize(None)
         
-        if 'Date' in df.columns:
-            df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
-            df = df.set_index('Date')
-            
-        for c in ['Open', 'High', 'Low', 'Close']:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors='coerce')
+        df.columns = [c.lower() for c in df.columns]
+        rename = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
+        df = df.rename(columns=rename)
         
         return df.interpolate(method='time').ffill().bfill()
     except: return None

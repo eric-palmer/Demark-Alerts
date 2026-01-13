@@ -1,4 +1,4 @@
-# main.py - Institutional Engine (Detailed & Explained)
+# main.py - Institutional Engine (English Analyst Mode)
 import time
 import pandas as pd
 import numpy as np
@@ -52,20 +52,31 @@ def get_market_radar_regime(macro):
         growth = macro.get('growth')
         inflation = macro.get('inflation')
         if growth is None or inflation is None:
-            if macro.get('net_liq') is not None:
-                nl = macro['net_liq']
-                if len(nl) > 63 and nl.iloc[-1] > nl.iloc[-63]:
-                    return "LIQUIDITY EXPANSION", "Fed Adding Liquidity (Growth Data Missing)"
             return "NEUTRAL", "Macro Data Unavailable"
-        g_impulse = growth.pct_change(3).iloc[-1]
-        i_impulse = inflation.pct_change(63).iloc[-1]
-        if g_impulse > 0:
-            if i_impulse < 0: return "RISK_ON", "GOLDILOCKS (Growth ⬆️ Inf ⬇️)"
-            else: return "REFLATION", "HEATING UP (Growth ⬆️ Inf ⬆️)"
+        g_imp = growth.pct_change(3).iloc[-1]
+        i_imp = inflation.pct_change(63).iloc[-1]
+        
+        if g_imp > 0:
+            if i_imp < 0: return "GOLDILOCKS", "Risk On (Longs Preferred)"
+            else: return "REFLATION", "Inflationary (Commodities Long)"
         else:
-            if i_impulse < 0: return "SLOWDOWN", "COOLING (Growth ⬇️ Inf ⬇️)"
-            else: return "RISK_OFF", "STAGFLATION (Growth ⬇️ Inf ⬆️)"
+            if i_imp < 0: return "SLOWDOWN", "Deflationary (Bonds/Quality)"
+            else: return "STAGFLATION", "Risk Off (Cash/Shorts)"
     except: return "NEUTRAL", "Calc Error"
+
+def get_demark_status(df):
+    """Helper to extract DeMark status"""
+    try:
+        last = df.iloc[-1]
+        bs = last.get('Buy_Setup', 0); ss = last.get('Sell_Setup', 0)
+        count = safe_int(bs if bs > ss else ss)
+        setup_type = "Buy" if bs > ss else "Sell"
+        perf = last.get('Perfected', False)
+        return {
+            'type': setup_type, 'count': count, 
+            'perf': perf, 'is_9': (count == 9), 'is_13': (count == 13)
+        }
+    except: return {'type': 'None', 'count': 0, 'perf': False, 'is_9': False, 'is_13': False}
 
 def analyze_ticker(ticker, regime):
     try:
@@ -73,10 +84,12 @@ def analyze_ticker(ticker, regime):
         df = safe_download(ticker, client)
         if df is None: return None
 
+        # Filter Illiquid
         if '=F' not in ticker and '-USD' not in ticker:
             last_vol = df['Volume'].iloc[-5:].mean() * df['Close'].iloc[-1]
             if last_vol < 500000: return None 
 
+        # --- INDICATOR CALCULATIONS ---
         df['RSI'] = calc_rsi(df['Close'])
         df = calc_demark(df)
         sq_res = calc_squeeze(df)
@@ -87,165 +100,115 @@ def analyze_ticker(ticker, regime):
         
         last = df.iloc[-1]
         price = last['Close']
-        
         atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
         if pd.isna(atr): atr = price * 0.02
-        
-        # --- ENGLISH TRANSLATION & SCORING ---
-        score = 0
-        explanations = [] # Collect reasons for the score
-        
-        # 1. Trend Stack (Shannon)
-        # Check alignment: Price > 8 > 21 > 50
-        c = df['Close']
-        ema8 = c.ewm(span=8, adjust=False).mean()
-        ema21 = c.ewm(span=21, adjust=False).mean()
-        sma50 = ma['sma50']
-        sma200 = ma['sma200']
-        
-        l8 = ema8.iloc[-1]; l21 = ema21.iloc[-1]; l50 = sma50.iloc[-1]; l200 = sma200.iloc[-1]
-        
-        if price > l8 > l21 > l50:
-            trend_desc = "STRONG UPTREND (Price > 8 > 21 > 50)"
-            score += 2
-            explanations.append("Full Bullish Alignment")
-        elif price < l8 < l21 < l50:
-            trend_desc = "STRONG DOWNTREND (Price < 8 < 21 < 50)"
-            score -= 2
-            explanations.append("Full Bearish Alignment")
-        elif price > l200:
-            trend_desc = "Long Term Bull (Above 200d)"
-            score += 1
-        else:
-            trend_desc = "Choppy / Weak"
-            
-        # 2. DeMark
-        bs = last.get('Buy_Setup', 0); ss = last.get('Sell_Setup', 0)
-        dm_count = safe_int(bs if bs > ss else ss)
-        dm_type = "Buy" if bs > ss else "Sell"
-        perf = last.get('Perfected', False)
-        
-        dm_desc = f"{dm_type} {dm_count}"
-        if dm_count == 9:
-            score += 3
-            perf_txt = "PERFECTED" if perf else "UNPERFECTED"
-            dm_desc = f"**{dm_type} 9 ({perf_txt})**"
-            explanations.append(f"DeMark 9 Reversal Signal ({perf_txt})")
-        elif dm_count >= 1:
-            bars = 9 - dm_count
-            dm_desc += f" ({bars} days to 9)"
 
-        # 3. RSI
+        # --- TIME HORIZON ANALYSIS ---
+        
+        # 1. LONG TERM (6m+) - 200d Moving Average
+        sma200 = ma['sma200'].iloc[-1]
+        lt_bias = "Bullish" if price > sma200 else "Bearish"
+        
+        # 2. MEDIUM TERM (2-3m) - 50d MA & MACD
+        sma50 = ma['sma50'].iloc[-1]
+        macd_val = macd_data['macd'].iloc[-1]
+        macd_sig = macd_data['signal'].iloc[-1]
+        
+        mt_bias = "Neutral"
+        if price > sma50 and macd_val > macd_sig: mt_bias = "Bullish"
+        elif price < sma50 and macd_val < macd_sig: mt_bias = "Bearish"
+        
+        # 3. SHORT TERM (1-2w) - DeMark, RSI, Squeeze
+        daily_dm = get_demark_status(df)
         rsi_val = last['RSI']
-        if rsi_val > 70:
-            rsi_desc = "Overbought (>70)"
-            score += 2 # Counter trend short score
-            explanations.append("RSI Overbought (Sell Risk)")
-        elif rsi_val < 30:
-            rsi_desc = "Oversold (<30)"
-            score += 2 # Counter trend buy score
-            explanations.append("RSI Oversold (Bounce Likely)")
-        else:
-            rsi_desc = "Neutral"
-
-        # 4. ADX
-        adx_val = adx.iloc[-1]
-        if adx_val > 25:
-            adx_desc = "Trending"
-        else:
-            adx_desc = "Non-Trending"
-
-        # 5. Squeeze
-        if sq_res:
-            sq_desc = f"FIRING ({sq_res['bias']})"
-            score += 2
-            explanations.append("Volatility Squeeze Firing")
-        else:
-            sq_desc = "None"
-
-        # Final Direction
-        if score >= 4: direction = "STRONG BUY"
-        elif score >= 2: direction = "BUY"
-        elif score <= -4: direction = "STRONG SELL"
-        elif score <= -2: direction = "SELL"
-        else: direction = "NEUTRAL"
         
-        # Targets
-        if "BUY" in direction:
+        st_bias = "Neutral"
+        if rsi_val < 30 or daily_dm['is_9'] and daily_dm['type'] == 'Buy': st_bias = "Bullish (Bounce)"
+        elif rsi_val > 70 or daily_dm['is_9'] and daily_dm['type'] == 'Sell': st_bias = "Bearish (Pullback)"
+        elif shannon['breakout']: st_bias = "Bullish (Breakout)"
+
+        # --- SCORING (-10 to +10) ---
+        score = 0
+        if lt_bias == "Bullish": score += 2
+        else: score -= 2
+        
+        if mt_bias == "Bullish": score += 2
+        elif mt_bias == "Bearish": score -= 2
+        
+        if st_bias.startswith("Bullish"): score += 2
+        elif st_bias.startswith("Bearish"): score -= 2
+        
+        if sq_res: score += 2 if sq_res['bias'] == "BULLISH" else -2
+
+        # --- WEEKLY CONTEXT ---
+        weekly_txt = "Neutral"
+        try:
+            df_w = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
+            df_w = calc_demark(df_w)
+            w_dm = get_demark_status(df_w)
+            if w_dm['count'] > 0: weekly_txt = f"{w_dm['type']} {w_dm['count']}"
+        except: pass
+
+        # --- TARGETS ---
+        if score > 0: # Long
             target = price + (atr * 3)
             stop = price - (atr * 1.5)
-        elif "SELL" in direction:
+        else: # Short
             target = price - (atr * 3)
             stop = price + (atr * 1.5)
-        else:
-            target = 0; stop = 0
 
+        # --- PLAIN ENGLISH INTERPRETATION ---
+        rec = "⚪ NEUTRAL"
+        if score >= 4: rec = "🟢 STRONG BUY"
+        elif score >= 2: rec = "🟢 BUY"
+        elif score <= -4: rec = "🔴 STRONG SHORT"
+        elif score <= -2: rec = "🔴 SHORT"
+
+        adx_val = adx.iloc[-1]
+        adx_txt = "Trending" if adx_val > 25 else "Choppy"
+        
         return {
-            'ticker': ticker, 'price': price, 'score': score, 'direction': direction,
-            'reasons': explanations,
-            'details': {
-                'trend': trend_desc,
-                'demark': dm_desc,
-                'rsi': f"{rsi_val:.1f} ({rsi_desc})",
-                'adx': f"{adx_val:.1f} ({adx_desc})",
-                'squeeze': sq_desc,
-                'macd': "Bullish" if macd_data['macd'].iloc[-1] > macd_data['signal'].iloc[-1] else "Bearish"
+            'ticker': ticker, 'price': price, 'score': score, 'rec': rec,
+            'horizons': {'short': st_bias, 'med': mt_bias, 'long': lt_bias},
+            'techs': {
+                'demark': f"{daily_dm['type']} {daily_dm['count']}",
+                'weekly': weekly_txt,
+                'rsi': f"{rsi_val:.1f} ({'Oversold' if rsi_val<30 else ('Overbought' if rsi_val>70 else 'Neutral')})",
+                'adx': f"{adx_val:.1f} ({adx_txt})",
+                'macd': "Bull Cross" if macd_val > macd_sig else "Bear Cross",
+                'squeeze': sq_res['bias'] if sq_res else "None"
             },
             'plan': {'target': target, 'stop': stop}
         }
     except: return None
 
-def format_detailed_card(res):
-    d = res['details']
-    p = res['plan']
-    
-    # Header
-    icon = "🟢" if "BUY" in res['direction'] else ("🔴" if "SELL" in res['direction'] else "⚪")
+def format_card(res):
+    t = res['techs']
     msg = f"═════════════════════════\n"
-    msg += f"{icon} *{res['ticker']}* @ {fmt_price(res['price'])}\n"
-    msg += f"**Rating:** {res['direction']} ({res['score']}/10)\n"
-    
-    if res['reasons']:
-        msg += f"🔥 **Drivers:** {', '.join(res['reasons'])}\n"
-    
+    msg += f"*{res['ticker']}* @ {fmt_price(res['price'])}\n"
+    msg += f"**{res['rec']}** (Score: {res['score']})\n"
     msg += f"─────────────────────────\n"
     
-    # 3-Horizon Outlook
-    msg += f"🕰️ **TIME HORIZONS:**\n"
-    # Short Term: Driven by RSI/DeMark
-    st_bias = "Bullish" if "BUY" in res['direction'] else "Bearish"
-    msg += f"   • Short (1-2w): {st_bias} (Signal Based)\n"
-    # Med Term: Driven by MACD/50d
-    mt_bias = "Bullish" if "Bullish" in d['macd'] else "Bearish"
-    msg += f"   • Med (2-3m):   {mt_bias} ({d['macd']} MACD)\n"
-    # Long Term: Driven by 200d
-    lt_bias = "Bullish" if "Bull" in d['trend'] else "Bearish"
-    msg += f"   • Long (6m+):   {lt_bias}\n\n"
+    # Time Horizons
+    msg += f"🕰️ **Outlook:**\n"
+    msg += f"   • Short (1-2w): {res['horizons']['short']}\n"
+    msg += f"   • Med (2-3m):   {res['horizons']['med']}\n"
+    msg += f"   • Long (6m+):   {res['horizons']['long']}\n\n"
     
-    # Technical Deep Dive
-    msg += f"📊 **TECHNICAL DETAILS:**\n"
-    msg += f"   • **Trend:** {d['trend']}\n"
-    msg += f"   • **DeMark:** {d['demark']}\n"
-    msg += f"   • **RSI:** {d['rsi']}\n"
-    msg += f"   • **ADX:** {d['adx']}\n"
-    if d['squeeze'] != "None": msg += f"   • **Vol:** {d['squeeze']}\n"
+    # Technical Detail
+    msg += f"📊 **Technical Drivers:**\n"
+    msg += f"   • DeMark (D): {t['demark']}\n"
+    msg += f"   • DeMark (W): {t['weekly']}\n"
+    msg += f"   • RSI: {t['rsi']}\n"
+    msg += f"   • Trend: {t['macd']} | {t['adx']}\n"
+    
+    if t['squeeze'] != "None":
+        msg += f"   • **Vol:** Squeeze Firing ({t['squeeze']}) 🚀\n"
         
-    # Plan
-    if res['direction'] != "NEUTRAL":
-        msg += f"─────────────────────────\n"
-        msg += f"🎯 **Target:** {fmt_price(p['target'])}\n"
-        msg += f"🛑 **Stop:** {fmt_price(p['stop'])}\n"
-        
-    return msg + "\n"
-
-def format_ranking_card(res, title):
-    d = res['details']
-    msg = f"═════════════════════════\n"
-    msg += f"🚨 *{res['ticker']}* ({res['direction']})\n"
-    msg += f"👉 *{title}*\n"
-    msg += f"   • Logic: {', '.join(res['reasons'])}\n"
-    msg += f"   • Trend: {d['trend']}\n"
-    msg += f"🎯 {fmt_price(res['plan']['target'])} | 🛑 {fmt_price(res['plan']['stop'])}\n"
+    msg += f"─────────────────────────\n"
+    msg += f"🎯 **Target:** {fmt_price(res['plan']['target'])}\n"
+    msg += f"🛑 **Stop:** {fmt_price(res['plan']['stop'])}\n"
+    
     return msg + "\n"
 
 if __name__ == "__main__":
@@ -259,40 +222,41 @@ if __name__ == "__main__":
     send_telegram(f"📊 *MARKET REGIME: {regime}*\n{desc}")
 
     # 1. PRIORITY SCAN
-    print("Scanning Priorities...")
+    print("Scanning Portfolio...")
     priority_list = list(set(CURRENT_PORTFOLIO + SHORT_WATCHLIST))
-    port_results = []
+    results = []
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_map = {executor.submit(analyze_ticker, t, regime): t for t in priority_list}
         for future in as_completed(future_map):
             res = future.result()
-            if res: port_results.append(res)
+            if res: results.append(res)
             
-    port_results.sort(key=lambda x: x['ticker'] in CURRENT_PORTFOLIO, reverse=True)
+    # Sort: Portfolio first
+    results.sort(key=lambda x: x['ticker'] in CURRENT_PORTFOLIO, reverse=True)
     
     msg = "💼 *PORTFOLIO & WATCHLIST*\n"
-    for r in port_results:
-        msg += format_detailed_card(r)
+    for r in results:
+        msg += format_card(r)
     send_telegram(msg)
 
-    # 2. SAMPLER (Test Mode)
+    # 2. SAMPLER SCAN (Test 5 Randoms)
     others = [t for t in STRATEGIC_TICKERS if t not in priority_list]
     scan_batch = random.sample(others, 5)
     
-    print(f"Scanning {len(scan_batch)} Random Tickers...")
-    results = []
+    print("Scanning Sample Batch...")
+    scan_results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_map = {executor.submit(analyze_ticker, t, regime): t for t in scan_batch}
         for future in as_completed(future_map):
             res = future.result()
-            if res: results.append(res)
+            if res: scan_results.append(res)
             
-    # Rankings
-    power = [r for r in results if abs(r['score']) >= 4]
+    # Power Rankings
+    power = [r for r in scan_results if abs(r['score']) >= 4]
     if power:
         msg = "🔥 *POWER RANKINGS*\n"
-        for r in power: msg += format_ranking_card(r, "High Conviction Setup")
+        for r in power: msg += format_card(r)
         send_telegram(msg)
         
     print("🛑 SAMPLE COMPLETE. Exiting.")

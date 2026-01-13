@@ -1,4 +1,4 @@
-# data_fetcher.py - Institutional Data (Adjusted Priority)
+# data_fetcher.py - Institutional Data (ADX Fix)
 import pandas as pd
 import time
 import os
@@ -38,7 +38,8 @@ def standardize_columns(df):
 
 def fetch_tiingo(ticker, client):
     try:
-        start_date = (datetime.datetime.now() - datetime.timedelta(days=730)).strftime('%Y-%m-%d')
+        # Fetch 2.5 years to ensure ADX smoothing has plenty of runway
+        start_date = (datetime.datetime.now() - datetime.timedelta(days=900)).strftime('%Y-%m-%d')
         
         if '-USD' in ticker:
             sym = ticker.replace('-USD', '').lower() + 'usd'
@@ -52,10 +53,18 @@ def fetch_tiingo(ticker, client):
 
         df = standardize_columns(df)
         
+        # FIX: Ensure no zeros in High/Low (breaks ADX division)
+        # If High=0, replace with Close
+        mask = df['High'] <= 0
+        if mask.any():
+            df.loc[mask, 'High'] = df.loc[mask, 'Close']
+            df.loc[mask, 'Low'] = df.loc[mask, 'Close']
+
         for c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
             
-        return df.interpolate(method='time').ffill().bfill()
+        # FIX: Backfill first, then Forward fill to handle start-of-data gaps
+        return df.bfill().ffill()
     except: return None
 
 def fetch_fallback(ticker):
@@ -72,7 +81,7 @@ def fetch_fallback(ticker):
         rename = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
         df = df.rename(columns=rename)
         
-        return df.interpolate(method='time').ffill().bfill()
+        return df.bfill().ffill()
     except: return None
 
 def safe_download(ticker, client=None):
@@ -107,13 +116,13 @@ def get_macro():
                 return pd.to_numeric(df['value'], errors='coerce')
             
             ism = get('NAPM')
-            if ism is not None: result['growth'] = ism
+            if ism is not None: result['growth'] = ism.rolling(3).mean()
             inf = get('T5YIE')
-            if inf is not None: result['inflation'] = inf
+            if inf is not None: result['inflation'] = inf.rolling(10).mean()
             walcl = get('WALCL'); tga = get('WTREGEN'); rrp = get('RRPONTSYD')
             if all(x is not None for x in [walcl, tga, rrp]):
                 min_len = min(len(walcl), len(tga), len(rrp))
-                result['net_liq'] = (walcl.iloc[-min_len:].values/1000) - tga.iloc[-min_len:].values - rrp.iloc[-min_len:].values
-                result['net_liq'] = pd.Series(result['net_liq'])
+                net = (walcl.iloc[-min_len:].values/1000) - tga.iloc[-min_len:].values - rrp.iloc[-min_len:].values
+                result['net_liq'] = pd.Series(net).rolling(10).mean()
         except: pass
     return result

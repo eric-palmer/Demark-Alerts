@@ -11,15 +11,19 @@ def fmt_price(val):
 
 def send_telegram(message):
     """Sends message via Telegram Bot"""
-    # USE THE STANDARDIZED NAMES
+    # 1. READ SECRETS (Using the new standardized names)
     token = os.environ.get('TELEGRAM_BOT_TOKEN')
     chat_id = os.environ.get('TELEGRAM_CHAT_ID')
 
+    # 2. VALIDATION
     if not token or not chat_id:
-        print("⚠️ TELEGRAM SECRETS MISSING in utils.py")
-        print(f"[Would have sent]: {message}")
+        print("⚠️ TELEGRAM SECRETS MISSING inside utils.py")
+        print(f"   - Token found? {'Yes' if token else 'No'}")
+        print(f"   - Chat ID found? {'Yes' if chat_id else 'No'}")
+        print(f"[Would have sent]:\n{message}")
         return
 
+    # 3. SEND REQUEST
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {
@@ -30,9 +34,9 @@ def send_telegram(message):
         resp = requests.post(url, json=payload, timeout=10)
         
         if resp.status_code != 200:
-            print(f"❌ Telegram Send Failed: {resp.text}")
+            print(f"❌ Telegram Send Failed (Code {resp.status_code}): {resp.text}")
         else:
-            print("✅ Telegram Message Sent.")
+            print("✅ Telegram Message Sent Successfully.")
             
     except Exception as e:
-        print(f"❌ Telegram Error: {e}")
+        print(f"❌ Telegram Connection Error: {e}")

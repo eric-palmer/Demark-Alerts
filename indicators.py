@@ -1,4 +1,4 @@
-# indicators.py - Institutional Math (Pro)
+# indicators.py - Verified Institutional Math (Pro)
 import pandas as pd
 import numpy as np
 
@@ -12,12 +12,10 @@ def calc_fibs(df):
         recent = df.iloc[-lookback:]
         h = recent['High'].max(); l = recent['Low'].min()
         diff = h - l
-        
         levels = {
             'High': h, '23.6%': h-(diff*0.236), '38.2%': h-(diff*0.382),
             '50%': h-(diff*0.5), '61.8%': h-(diff*0.618), 'Low': l
         }
-        
         price = df['Close'].iloc[-1]
         nearest = min(levels.items(), key=lambda x: abs(x[1] - price))
         return {'nearest_name': nearest[0], 'nearest_val': nearest[1]}
@@ -34,7 +32,7 @@ def calc_vol_term(df):
         
         if curr_10 < curr_100 * 0.8: return "Cheap (Buy Debit)"
         elif curr_10 > curr_100 * 1.2: return "Expensive (Sell Credit)"
-        return "Fair Value"
+        return "Normal"
     except: return "Normal"
 
 # --- STANDARD INDICATORS ---
@@ -53,10 +51,10 @@ def calc_trend_stack(df):
         s50 = c.rolling(50).mean()
         lc = c.iloc[-1]; l8 = e8.iloc[-1]; l21 = e21.iloc[-1]; l50 = s50.iloc[-1]
         
-        if lc > l8 > l21 > l50: return {'status': "Strong Uptrend (Stack Aligned)"}
-        elif lc < l8 < l21 < l50: return {'status': "Strong Downtrend (Stack Aligned)"}
+        if lc > l8 > l21 > l50: return {'status': "Strong Uptrend"}
+        elif lc < l8 < l21 < l50: return {'status': "Strong Downtrend"}
         elif lc > l8: return {'status': "Positive Momentum"}
-        return {'status': "Choppy / Neutral"}
+        return {'status': "No Trend"}
     except: return {'status': "Error"}
 
 def calc_macd(df):
@@ -96,14 +94,14 @@ def calc_demark_detailed(df):
         c = df['Close'].values; l = df['Low'].values; h = df['High'].values
         bs = np.zeros(len(c), dtype=int); ss = np.zeros(len(c), dtype=int)
         
-        # Setup
+        # Setup (9)
         for i in range(4, len(c)):
             if c[i] < c[i-4]: bs[i] = bs[i-1]+1
             else: bs[i] = 0
             if c[i] > c[i-4]: ss[i] = ss[i-1]+1
             else: ss[i] = 0
             
-        # Countdown
+        # Countdown (13) - Only active after 9
         b_cnt = 0; s_cnt = 0; b_active = False; s_active = False
         start = max(0, len(c)-100)
         for i in range(start, len(c)):
@@ -116,7 +114,7 @@ def calc_demark_detailed(df):
                 s_cnt += 1
                 if s_cnt==13: s_active=False
                 
-        # Perfection
+        # Perfection Check
         last = len(c)-1; perf = False
         if bs[last] >= 9:
             if (l[last]<l[last-2] and l[last]<l[last-3]) or (l[last-1]<l[last-2] and l[last-1]<l[last-3]): perf=True

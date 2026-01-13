@@ -1,8 +1,8 @@
-# main.py - Institutional Pro Engine (Test Mode)
+# main.py - Connection Test & Scan
+import os
 import time
 import pandas as pd
 import numpy as np
-import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from data_fetcher import safe_download, get_macro, get_tiingo_client
@@ -10,25 +10,55 @@ from indicators import (calc_rsi, calc_squeeze, calc_demark_detailed,
                         calc_shannon, calc_adx, calc_ma_trend, 
                         calc_macd, calc_trend_stack, calc_rvol, 
                         calc_donchian, calc_fibs, calc_vol_term)
-from tickers import get_universe
 from utils import send_telegram, fmt_price
 
 # --- CONFIGURATION ---
-MAX_WORKERS = 10       # Pro Power
+MAX_WORKERS = 10       
 
 # --- ASSETS ---
 CURRENT_PORTFOLIO = ['SLV', 'DJT']
 SHORT_WATCHLIST = ['LAC', 'IBIT', 'ETHA', 'SPY', 'QQQ']
 
-def get_market_radar_regime(macro):
-    return "NEUTRAL", "Macro Data Unavailable"
+# --- 1. CONNECTION CHECK ---
+def check_connection():
+    print("🔌 TESTING CONNECTION...")
+    key = os.environ.get('TIINGO_API_KEY')
+    if not key:
+        print("❌ CRITICAL: TIINGO_API_KEY is missing from Environment!")
+        print("   -> Go to GitHub Settings > Secrets > Actions")
+        print("   -> Ensure 'TIINGO_API_KEY' exists and has no spaces.")
+        return False
+    
+    print(f"✅ API Key Detected (Length: {len(key)})")
+    
+    client = get_tiingo_client()
+    if not client:
+        print("❌ Client Init Failed.")
+        return False
+        
+    print("✅ Client Initialized. Attempting Test Fetch (SPY)...")
+    try:
+        # Test fetch of 1 day
+        df = client.get_dataframe("SPY", startDate="2024-01-01", endDate="2024-01-05")
+        if not df.empty:
+            print("✅ TEST FETCH SUCCESSFUL. Data pipeline is go.")
+            return True
+        else:
+            print("⚠️ Test Fetch returned Empty Data.")
+            return False
+    except Exception as e:
+        print(f"❌ CONNECTION ERROR: {e}")
+        return False
 
+# --- ANALYSIS ENGINE ---
 def analyze_ticker(ticker, regime, detailed=False):
-    print(f"...Analyzing {ticker}")
+    print(f"...Scanning {ticker}")
     try:
         client = get_tiingo_client()
         df = safe_download(ticker, client)
-        if df is None: return None
+        if df is None: 
+            print(f"   ❌ {ticker}: Download returned None (Check Data Fetcher)")
+            return None
 
         # --- INDICATORS ---
         df['RSI'] = calc_rsi(df['Close'])
@@ -61,16 +91,12 @@ def analyze_ticker(ticker, regime, detailed=False):
 
         # --- SCORING ---
         score = 0
-        
-        # Trend
         if ma['sma200'].iloc[-1] > 0:
             score += 2 if price > ma['sma200'].iloc[-1] else -2
             
-        # Momentum
         if macd['macd'].iloc[-1] > macd['signal'].iloc[-1]: score += 1
         else: score -= 1
         
-        # DeMark
         st_bias = "Neutral"
         if dm_d['is_9']:
             st_bias = f"{dm_d['type']} 9 Reversal"
@@ -78,19 +104,16 @@ def analyze_ticker(ticker, regime, detailed=False):
         elif dm_d['count'] > 0:
             st_bias = f"{dm_d['type']} {dm_d['count']}"
             
-        # Fib Bonus
         fib_note = ""
         if abs(price - fibs['nearest_val']) / price < 0.02:
-            fib_note = f"Testing {fibs['nearest_name']}"
-            if dm_d['is_9']: score += 2 # Confluence Boost
+            fib_note = f"At {fibs['nearest_name']}"
+            if dm_d['is_9']: score += 2
 
-        # RSI & Vol
         if last['RSI'] > 70: score -= 2
         elif last['RSI'] < 30: score += 2
         if sq: score += 2
         if rvol > 1.5: score *= 1.2
 
-        # --- TARGETS ---
         if score > 0: 
             target = struct['high'] if struct['high'] > price else price + (atr * 3)
             stop = struct['low'] if struct['low'] < price else price - (atr * 1.5)
@@ -100,7 +123,6 @@ def analyze_ticker(ticker, regime, detailed=False):
             
         days = max(1, int(abs(target - price) / (atr * 0.8)))
 
-        # Verdict
         rec = "⚪ NEUTRAL"
         if score >= 4: rec = "🟢 STRONG BUY"
         elif score >= 2: rec = "🟢 BUY"
@@ -134,29 +156,29 @@ def format_card(res):
     t = res['techs']
     msg = f"═════════════════════════\n"
     msg += f"*{res['ticker']}* @ {fmt_price(res['price'])}\n"
-    msg += f"**{res['rec']}** (Score: {res['score']})\n\n"
-    
+    msg += f"**{res['rec']}** ({res['score']})\n\n"
     msg += f"🕰️ **Outlook:**\n"
     msg += f"   • Short: {res['horizons']['short']}\n"
     msg += f"   • Med:   {res['horizons']['med']}\n\n"
-    
     msg += f"📊 **Vitals:**\n"
     msg += f"   • Trend: {t['stack']}\n"
     msg += f"   • DeMark (D): {t['demark_d']}\n"
     msg += f"   • DeMark (W): {t['demark_w']}\n"
     msg += f"   • RSI: {t['rsi']}\n"
-    
     if t['fib']: msg += f"   • **Fib:** {t['fib']}\n"
     msg += f"   • **Opt:** {t['opt']}\n"
-    
     msg += f"\n🎯 Target: {fmt_price(res['plan']['target'])} (~{res['plan']['days']} Days)\n"
     msg += f"🛑 Stop: {fmt_price(res['plan']['stop'])}\n"
-    
     return msg + "\n"
 
 if __name__ == "__main__":
-    print("="*60); print("INSTITUTIONAL PRO SCANNER (Test Mode)"); print("="*60)
+    print("="*60); print("INSTITUTIONAL PRO SCANNER (Debug Mode)"); print("="*60)
     
+    # 1. RUN CONNECTION CHECK
+    if not check_connection():
+        print("🛑 STOPPING: Fix API Key First.")
+        exit()
+
     try:
         macro = get_macro()
         regime, desc = get_market_radar_regime(macro)
@@ -164,7 +186,7 @@ if __name__ == "__main__":
         regime = "NEUTRAL"; desc = "Macro Data Failed"
     send_telegram(f"📊 *MARKET REGIME: {regime}*\n{desc}")
 
-    # 1. PRIORITY SCAN (Portfolio Only)
+    # 2. RUN PORTFOLIO SCAN
     print("Scanning Portfolio & Watchlist...")
     priority_list = list(set(CURRENT_PORTFOLIO + SHORT_WATCHLIST))
     results = []
@@ -184,8 +206,5 @@ if __name__ == "__main__":
     else:
         print("❌ FAILURE: No results generated.")
 
-    # NOTE: Full Market Scan is DISABLED for this test.
-    # To enable: Uncomment the Universe Logic later.
-    
     print("🛑 TEST COMPLETE. Exiting.")
     exit()

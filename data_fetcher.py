@@ -1,4 +1,4 @@
-# data_fetcher.py - Institutional Data (ADX Fix)
+# data_fetcher.py - Institutional Data (Deep History)
 import pandas as pd
 import time
 import os
@@ -15,10 +15,9 @@ def get_tiingo_client():
 def standardize_columns(df):
     """Maps Adjusted Columns to Standard Names"""
     df.columns = [c.lower() for c in df.columns]
-    
     final_df = pd.DataFrame(index=df.index)
     
-    # Priority: Adjusted (Matches your $72 SLV price)
+    # Priority: Adjusted Data
     mapping = {
         'Open': 'adjopen', 'High': 'adjhigh', 'Low': 'adjlow', 'Close': 'adjclose', 'Volume': 'adjvolume'
     }
@@ -32,14 +31,14 @@ def standardize_columns(df):
         elif raw_mapping[target] in df.columns:
             final_df[target] = df[raw_mapping[target]]
         else:
-            final_df[target] = 0.0 # Safety fill
+            final_df[target] = 0.0
             
     return final_df
 
 def fetch_tiingo(ticker, client):
     try:
-        # Fetch 2.5 years to ensure ADX smoothing has plenty of runway
-        start_date = (datetime.datetime.now() - datetime.timedelta(days=900)).strftime('%Y-%m-%d')
+        # FETCH 4 YEARS (Required for accurate Weekly DeMark 13 counts)
+        start_date = (datetime.datetime.now() - datetime.timedelta(days=1460)).strftime('%Y-%m-%d')
         
         if '-USD' in ticker:
             sym = ticker.replace('-USD', '').lower() + 'usd'
@@ -53,8 +52,7 @@ def fetch_tiingo(ticker, client):
 
         df = standardize_columns(df)
         
-        # FIX: Ensure no zeros in High/Low (breaks ADX division)
-        # If High=0, replace with Close
+        # Zero protection
         mask = df['High'] <= 0
         if mask.any():
             df.loc[mask, 'High'] = df.loc[mask, 'Close']
@@ -63,42 +61,14 @@ def fetch_tiingo(ticker, client):
         for c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
             
-        # FIX: Backfill first, then Forward fill to handle start-of-data gaps
-        return df.bfill().ffill()
-    except: return None
-
-def fetch_fallback(ticker):
-    try:
-        dat = yf.Ticker(ticker)
-        df = dat.history(period="2y", auto_adjust=True)
-        if df.empty: return None
-        df = df.reset_index()
-        if 'Date' in df.columns: df = df.set_index('Date')
-        elif 'date' in df.columns: df = df.set_index('date')
-        df.index = pd.to_datetime(df.index).tz_localize(None)
-        
-        df.columns = [c.lower() for c in df.columns]
-        rename = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
-        df = df.rename(columns=rename)
-        
         return df.bfill().ffill()
     except: return None
 
 def safe_download(ticker, client=None):
-    if any(x in ticker for x in ['=F', 'DX-Y', '=X']):
-        return fetch_fallback(ticker)
-
-    df = None
+    if any(x in ticker for x in ['=F', 'DX-Y', '=X']): return None 
     if client:
         time.sleep(PAUSE_SEC)
-        df = fetch_tiingo(ticker, client)
-    
-    if df is None or len(df) < 5:
-        df = fetch_fallback(ticker)
-        
-    if df is not None:
-        if len(df) > 30: return df
-            
+        return fetch_tiingo(ticker, client)
     return None
 
 def get_macro():

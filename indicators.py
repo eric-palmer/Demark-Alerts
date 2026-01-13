@@ -1,4 +1,4 @@
-# indicators.py - Verified Institutional Math (Fixed)
+# indicators.py - Verified Institutional Math (Updated Fix)
 import pandas as pd
 import numpy as np
 
@@ -7,7 +7,7 @@ def sanitize(series):
 
 # --- DEMARK LOGIC (Crash-Proof) ---
 def calc_demark_detailed(df):
-    # Initialize Default Result (Safe Fallback)
+    # Initialize Default Result with ALL required keys
     res = {
         'type': 'Neutral', 'count': 0, 'countdown': 0, 
         'perf': False, 'is_9': False, 'is_13': False
@@ -15,7 +15,7 @@ def calc_demark_detailed(df):
     
     try:
         c = df['Close'].values; l = df['Low'].values; h = df['High'].values
-        if len(c) < 20: return res # Not enough data
+        if len(c) < 20: return res 
 
         # 1. SETUP (9)
         bs = np.zeros(len(c), dtype=int)

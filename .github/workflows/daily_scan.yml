@@ -24,9 +24,9 @@ jobs:
 
     - name: Run Trading Engine
       env:
-        # --- THIS IS THE PART YOU WERE MISSING ---
+        # --- THIS IS THE MISSING PART ---
         TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        # -----------------------------------------
+        # --------------------------------
       run: python main.py

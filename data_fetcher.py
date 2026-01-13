@@ -1,8 +1,9 @@
-# data_fetcher.py - Institutional Data (Deep History)
+# data_fetcher.py - Institutional Data (Debug Mode)
 import pandas as pd
 import time
 import os
 import datetime
+import traceback
 import yfinance as yf
 from tiingo import TiingoClient
 
@@ -14,41 +15,54 @@ def get_tiingo_client():
 
 def standardize_columns(df):
     """Maps Adjusted Columns to Standard Names"""
+    # Force lowercase for easier matching
     df.columns = [c.lower() for c in df.columns]
+    
     final_df = pd.DataFrame(index=df.index)
     
-    # Priority: Adjusted Data
-    mapping = {
-        'Open': 'adjopen', 'High': 'adjhigh', 'Low': 'adjlow', 'Close': 'adjclose', 'Volume': 'adjvolume'
-    }
-    raw_mapping = {
-        'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'
+    # Mapping Dictionary (Target: [Possible Source Column Names])
+    # We prioritize 'adj' columns for stocks
+    col_map = {
+        'Open': ['adjopen', 'open'],
+        'High': ['adjhigh', 'high'],
+        'Low': ['adjlow', 'low'],
+        'Close': ['adjclose', 'close'],
+        'Volume': ['adjvolume', 'volume']
     }
     
-    for target, adj_col in mapping.items():
-        if adj_col in df.columns:
-            final_df[target] = df[adj_col]
-        elif raw_mapping[target] in df.columns:
-            final_df[target] = df[raw_mapping[target]]
-        else:
+    for target, sources in col_map.items():
+        found = False
+        for src in sources:
+            if src in df.columns:
+                final_df[target] = df[src]
+                found = True
+                break
+        if not found:
+            # Critical: If we can't find a column, fill 0 to prevent crash, but log it
             final_df[target] = 0.0
             
     return final_df
 
 def fetch_tiingo(ticker, client):
     try:
-        # FETCH 4 YEARS (Required for accurate Weekly DeMark 13 counts)
+        # Fetch 4 years for Weekly DeMark
         start_date = (datetime.datetime.now() - datetime.timedelta(days=1460)).strftime('%Y-%m-%d')
         
         if '-USD' in ticker:
             sym = ticker.replace('-USD', '').lower() + 'usd'
             data = client.get_crypto_price_history(tickers=[sym], startDate=start_date, resampleFreq='1day')
             df = pd.DataFrame(data[0].get('priceData', []))
-            df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
-            df = df.set_index('date')
+            if not df.empty:
+                df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
+                df = df.set_index('date')
         else:
             df = client.get_dataframe(ticker, startDate=start_date)
-            df.index = df.index.tz_localize(None)
+            if not df.empty:
+                df.index = df.index.tz_localize(None)
+
+        if df.empty:
+            print(f"   ⚠️ {ticker}: Tiingo returned empty DataFrame.")
+            return None
 
         df = standardize_columns(df)
         
@@ -62,7 +76,11 @@ def fetch_tiingo(ticker, client):
             df[c] = pd.to_numeric(df[c], errors='coerce')
             
         return df.bfill().ffill()
-    except: return None
+        
+    except Exception as e:
+        print(f"   ❌ {ticker} Fetch Error: {e}")
+        # traceback.print_exc() # Uncomment to see full error stack if needed
+        return None
 
 def safe_download(ticker, client=None):
     if any(x in ticker for x in ['=F', 'DX-Y', '=X']): return None 

@@ -1,4 +1,4 @@
-# main.py - Institutional Pro Engine (Final Production)
+# main.py - Institutional Pro Engine (All Desks Active)
 import os
 import time
 import pandas as pd
@@ -14,9 +14,9 @@ from tickers import get_universe
 from utils import send_telegram, fmt_price
 
 # --- CONFIGURATION ---
-BATCH_SIZE = 100       # High throughput for 800 tickers
-SLEEP_TIME = 1         # 1s pause between batches
-MAX_WORKERS = 20       # Parallel processing power
+BATCH_SIZE = 100       # High throughput
+SLEEP_TIME = 1         # Minimal latency
+MAX_WORKERS = 20       # Parallel power
 
 # --- ASSETS ---
 CURRENT_PORTFOLIO = ['SLV', 'DJT']
@@ -57,7 +57,7 @@ def analyze_ticker(ticker, regime, detailed=False):
         atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
         if pd.isna(atr): atr = price * 0.02
 
-        # --- WEEKLY (Deep History) ---
+        # --- WEEKLY ---
         dm_w = {'type': 'Neutral', 'count': 0, 'countdown': 0, 'is_9': False}
         if detailed:
             try:
@@ -80,12 +80,12 @@ def analyze_ticker(ticker, regime, detailed=False):
         elif dm_d['count'] > 0:
             st_bias = f"{dm_d['type']} {dm_d['count']}"
             
-        # Timeframe Conflict (The "Safety Valve")
+        # Conflict Check
         conflict = False
         if dm_d['count'] >= 5 and dm_w['count'] >= 5:
             if dm_d['type'] != dm_w['type']:
                 conflict = True
-                score = score / 2 # Slash score if conflicting signals
+                score = score / 2 
 
         # Fibs
         fib_note = ""
@@ -111,7 +111,6 @@ def analyze_ticker(ticker, regime, detailed=False):
         adx_val = adx.iloc[-1]
         adx_txt = "Trending" if adx_val > 25 else "Flat"
         
-        # Targets
         target = struct['high'] if score > 0 else struct['low']
         stop = struct['low'] if score > 0 else struct['high']
         days = max(1, int(abs(target - price) / (atr * 0.8)))
@@ -127,7 +126,8 @@ def analyze_ticker(ticker, regime, detailed=False):
                 'vol': f"{rvol:.1f}x",
                 'squeeze': "FIRING" if sq else "None",
                 'fib': fib_note,
-                'opt': vol_term
+                'opt': vol_term,
+                'rsi_val': last['RSI'] # Raw value for filtering
             },
             'plan': {'target': target, 'stop': stop, 'days': days}
         }
@@ -164,10 +164,16 @@ def format_portfolio_card(res):
 def format_scanner_card(res):
     """Highlight Card for Universe"""
     t = res['techs']
+    
+    dm_txt = f"{t['demark_d']['type']} {t['demark_d']['count']}"
+    if t['demark_d']['is_9']: dm_txt += " (Perfected)"
+    
     msg = f"═════════════════════════\n"
     msg += f"🔥 *{res['ticker']}* ({res['rec']})\n"
-    msg += f"   • Signal: {t['demark_d']['type']} {t['demark_d']['count']}\n"
+    msg += f"   • Signal: {dm_txt}\n"
+    msg += f"   • RSI: {t['rsi']} | Vol: {t['vol']}\n"
     if t['fib']: msg += f"   • Fib: {t['fib']}\n"
+    if t['squeeze'] != "None": msg += f"   • Vol: Squeeze Firing 🚀\n"
     msg += f"🎯 {fmt_price(res['plan']['target'])} | 🛑 {fmt_price(res['plan']['stop'])}\n"
     return msg + "\n"
 
@@ -210,7 +216,9 @@ if __name__ == "__main__":
                 if res: all_results.append(res)
         if i < len(batches) - 1: time.sleep(SLEEP_TIME)
 
-    # 3. PRO DESKS
+    # 3. PRO DESKS REPORTING
+    
+    # Power Rankings (Top 10 High Score)
     power = [r for r in all_results if abs(r['score']) >= 4]
     power.sort(key=lambda x: abs(x['score']), reverse=True)
     if power:
@@ -218,10 +226,25 @@ if __name__ == "__main__":
         for r in power[:10]: msg += format_scanner_card(r)
         send_telegram(msg)
         
+    # DeMark Desk (Any 9s or 13s)
     dm_desk = [r for r in all_results if (r['techs']['demark_d']['is_9'] or r['techs']['demark_d']['countdown']==13) and r not in power]
     if dm_desk:
         msg = "🔢 *DEMARK SIGNALS (Daily)*\n"
         for r in dm_desk[:10]: msg += format_scanner_card(r)
+        send_telegram(msg)
+
+    # RSI Desk (Oversold/Overbought)
+    rsi_desk = [r for r in all_results if (r['techs']['rsi_val'] < 30 or r['techs']['rsi_val'] > 70) and r not in power and r not in dm_desk]
+    if rsi_desk:
+        msg = "🌊 *RSI EXTREMES (Reversion)*\n"
+        for r in rsi_desk[:10]: msg += format_scanner_card(r)
+        send_telegram(msg)
+
+    # Squeeze Desk (Volatility Firing)
+    sq_desk = [r for r in all_results if r['techs']['squeeze'] != "None" and r not in power]
+    if sq_desk:
+        msg = "🚀 *VOLATILITY SQUEEZES*\n"
+        for r in sq_desk[:10]: msg += format_scanner_card(r)
         send_telegram(msg)
         
     print("DONE")

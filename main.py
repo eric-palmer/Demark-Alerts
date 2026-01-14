@@ -1,4 +1,4 @@
-# main.py - Institutional Pro Engine (Test Mode: Portfolio Only)
+# main.py - Institutional Pro Engine (Final Production)
 import os
 import time
 import pandas as pd
@@ -14,7 +14,9 @@ from tickers import get_universe
 from utils import send_telegram, fmt_price
 
 # --- CONFIGURATION ---
-MAX_WORKERS = 10       
+BATCH_SIZE = 100       # High throughput for 800 tickers
+SLEEP_TIME = 1         # 1s pause between batches
+MAX_WORKERS = 20       # Parallel processing power
 
 # --- ASSETS ---
 CURRENT_PORTFOLIO = ['SLV', 'DJT']
@@ -22,28 +24,21 @@ SHORT_WATCHLIST = ['LAC', 'IBIT', 'ETHA', 'SPY', 'QQQ']
 
 def check_env():
     """Double check secrets before starting"""
-    print("🔍 DEBUGGING ENVIRONMENT VARIABLES:")
-    
-    tiingo = os.environ.get('TIINGO_API_KEY')
-    bot = os.environ.get('TELEGRAM_BOT_TOKEN')
-    chat = os.environ.get('TELEGRAM_CHAT_ID')
-    
-    print(f"   - TIINGO KEY: {'✅ Found' if tiingo else '❌ MISSING'}")
-    print(f"   - BOT TOKEN:  {'✅ Found' if bot else '❌ MISSING'}")
-    print(f"   - CHAT ID:    {'✅ Found' if chat else '❌ MISSING'}")
-
-    if not tiingo or not bot or not chat:
-        print("❌ CRITICAL: Secrets are not passing to the script.")
-        print("   -> Check daily_scan.yml indentation and mapping.")
+    if not os.environ.get('TIINGO_API_KEY') or not os.environ.get('TELEGRAM_BOT_TOKEN'):
+        print("❌ CRITICAL: Secrets missing. Check YAML.")
         return False
     return True
 
 def analyze_ticker(ticker, regime, detailed=False):
-    print(f"...Scanning {ticker}")
     try:
         client = get_tiingo_client()
         df = safe_download(ticker, client)
         if df is None: return None
+
+        # Liquidity Gate: Skip illiquid assets (<$2M/day) unless in Portfolio
+        if ticker not in CURRENT_PORTFOLIO and ticker not in SHORT_WATCHLIST:
+            avg_vol_usd = (df['Close'] * df['Volume']).rolling(20).mean().iloc[-1]
+            if avg_vol_usd < 2000000: return None 
 
         # --- INDICATORS ---
         df['RSI'] = calc_rsi(df['Close'])
@@ -63,7 +58,6 @@ def analyze_ticker(ticker, regime, detailed=False):
         if pd.isna(atr): atr = price * 0.02
 
         # --- WEEKLY (Deep History) ---
-        # Default empty structure to prevent crashes if fetch fails
         dm_w = {'type': 'Neutral', 'count': 0, 'countdown': 0, 'is_9': False}
         if detailed:
             try:
@@ -71,20 +65,14 @@ def analyze_ticker(ticker, regime, detailed=False):
                 dm_w = calc_demark_detailed(df_w)
             except: pass
 
-        # --- SCORING SYSTEM ---
+        # --- SCORING ---
         score = 0
         
-        # 1. Trend
-        if ma['sma200'].iloc[-1] > 0:
-            lt_bias = "Bullish" if price > ma['sma200'].iloc[-1] else "Bearish"
-            score += 2 if "Bull" in lt_bias else -2
-        else: lt_bias = "Unknown"
-            
-        # 2. Momentum
-        if macd['macd'].iloc[-1] > macd['signal'].iloc[-1]: score += 1
-        else: score -= 1
+        # Trend & Momentum
+        if ma['sma200'].iloc[-1] > 0: score += 2 if price > ma['sma200'].iloc[-1] else -2
+        score += 1 if macd['macd'].iloc[-1] > macd['signal'].iloc[-1] else -1
         
-        # 3. DeMark
+        # DeMark
         st_bias = "Neutral"
         if dm_d['is_9']:
             st_bias = f"Reversal Setup ({dm_d['type']} 9)"
@@ -92,44 +80,47 @@ def analyze_ticker(ticker, regime, detailed=False):
         elif dm_d['count'] > 0:
             st_bias = f"{dm_d['type']} {dm_d['count']}"
             
-        # 4. Fib Bonus
+        # Timeframe Conflict (The "Safety Valve")
+        conflict = False
+        if dm_d['count'] >= 5 and dm_w['count'] >= 5:
+            if dm_d['type'] != dm_w['type']:
+                conflict = True
+                score = score / 2 # Slash score if conflicting signals
+
+        # Fibs
         fib_note = ""
         if abs(price - fibs['nearest_val']) / price < 0.02:
             fib_note = f"At {fibs['nearest_name']}"
             if dm_d['is_9']: score += 2
 
-        # 5. RSI/Vol
+        # RSI/Vol
         if last['RSI'] > 70: score -= 2
         elif last['RSI'] < 30: score += 2
         if sq: score += 2
         if rvol > 1.5: score *= 1.2
 
-        # --- TARGETS ---
-        if score > 0: 
-            target = struct['high'] if struct['high'] > price else price + (atr * 3)
-            stop = struct['low'] if struct['low'] < price else price - (atr * 1.5)
-        else:
-            target = struct['low'] if struct['low'] < price else price - (atr * 3)
-            stop = struct['high'] if struct['high'] > price else price + (atr * 1.5)
-            
-        days = max(1, int(abs(target - price) / (atr * 0.8)))
-
-        # Verdict
+        # --- VERDICT ---
         rec = "⚪ NEUTRAL"
         if score >= 4: rec = "🟢 STRONG BUY"
         elif score >= 2: rec = "🟢 BUY"
         elif score <= -4: rec = "🔴 STRONG SHORT"
         elif score <= -2: rec = "🔴 SHORT"
+        
+        if conflict: rec = "⚠️ CONFLICT (Wait)"
 
         adx_val = adx.iloc[-1]
         adx_txt = "Trending" if adx_val > 25 else "Flat"
+        
+        # Targets
+        target = struct['high'] if score > 0 else struct['low']
+        stop = struct['low'] if score > 0 else struct['high']
+        days = max(1, int(abs(target - price) / (atr * 0.8)))
 
         return {
             'ticker': ticker, 'price': price, 'score': round(score, 1), 'rec': rec,
             'horizons': {'short': st_bias, 'med': "Bullish" if score>0 else "Bearish"},
             'techs': {
-                'demark_d': dm_d,
-                'demark_w': dm_w,
+                'demark_d': dm_d, 'demark_w': dm_w,
                 'rsi': f"{last['RSI']:.1f}",
                 'adx': f"{adx_val:.1f} ({adx_txt})",
                 'stack': stack['status'],
@@ -140,19 +131,16 @@ def analyze_ticker(ticker, regime, detailed=False):
             },
             'plan': {'target': target, 'stop': stop, 'days': days}
         }
-    except Exception as e:
-        print(f"❌ Error {ticker}: {e}")
-        return None
+    except: return None
 
 def format_portfolio_card(res):
-    """Deep Dive Format for Portfolio"""
+    """Deep Dive for Portfolio"""
     t = res['techs']
-    d_dm = t['demark_d']
-    w_dm = t['demark_w']
+    d_dm = t['demark_d']; w_dm = t['demark_w']
     
-    # Formatted DeMark Lines
     dd_txt = f"{d_dm['type']} {d_dm['count']}"
     if d_dm['is_9']: dd_txt += f" ({'PERFECTED' if d_dm['perf'] else 'UNPERFECTED'})"
+    if d_dm['countdown'] > 0: dd_txt += f" | Countdown: {d_dm['countdown']}/13"
     
     wd_txt = f"{w_dm['type']} {w_dm['count']}"
     if w_dm['is_9']: wd_txt += " (SETUP COMPLETE)"
@@ -161,47 +149,79 @@ def format_portfolio_card(res):
     msg += f"*{res['ticker']}* @ {fmt_price(res['price'])}\n"
     msg += f"**{res['rec']}** (Score: {res['score']})\n"
     msg += f"─────────────────────────\n"
-    
     msg += f"📊 **FULL TECHNICALS:**\n"
     msg += f"   • Daily DeMark: {dd_txt}\n"
     msg += f"   • Weekly DeMark: {wd_txt}\n"
     msg += f"   • Trend: {t['stack']}\n"
     msg += f"   • RSI: {t['rsi']} | Vol: {t['vol']}\n"
-    
     if t['fib']: msg += f"   • Fib: {t['fib']}\n"
     if t['squeeze'] != "None": msg += f"   • Squeeze: FIRING 🚀\n"
     msg += f"   • Options: {t['opt']}\n"
-        
     msg += f"\n🎯 Target: {fmt_price(res['plan']['target'])} (~{res['plan']['days']} Days)\n"
     msg += f"🛑 Stop: {fmt_price(res['plan']['stop'])}\n"
-    
+    return msg + "\n"
+
+def format_scanner_card(res):
+    """Highlight Card for Universe"""
+    t = res['techs']
+    msg = f"═════════════════════════\n"
+    msg += f"🔥 *{res['ticker']}* ({res['rec']})\n"
+    msg += f"   • Signal: {t['demark_d']['type']} {t['demark_d']['count']}\n"
+    if t['fib']: msg += f"   • Fib: {t['fib']}\n"
+    msg += f"🎯 {fmt_price(res['plan']['target'])} | 🛑 {fmt_price(res['plan']['stop'])}\n"
     return msg + "\n"
 
 if __name__ == "__main__":
-    print("="*60); print("INSTITUTIONAL PRO SCANNER (Test Mode)"); print("="*60)
+    print("="*60); print("INSTITUTIONAL PRO ENGINE (Production)"); print("="*60)
     
-    # 1. CHECK SECRETS
     if not check_env(): exit()
 
-    # 2. RUN PORTFOLIO SCAN
-    print("Scanning Portfolio & Watchlist...")
+    # 1. PORTFOLIO SCAN
+    print("Scanning Portfolio...")
     priority_list = list(set(CURRENT_PORTFOLIO + SHORT_WATCHLIST))
     results = []
-    
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_map = {executor.submit(analyze_ticker, t, "NEUTRAL", detailed=True): t for t in priority_list}
         for future in as_completed(future_map):
             res = future.result()
             if res: results.append(res)
-            
     results.sort(key=lambda x: x['ticker'] in CURRENT_PORTFOLIO, reverse=True)
-    
-    if results:
-        msg = "💼 *PORTFOLIO & WATCHLIST*\n"
-        for r in results: msg += format_portfolio_card(r)
-        send_telegram(msg)
-    else:
-        print("❌ FAILURE: No results generated.")
+    msg = "💼 *PORTFOLIO & WATCHLIST*\n"
+    for r in results: msg += format_portfolio_card(r)
+    send_telegram(msg)
 
-    print("🛑 TEST COMPLETE. Universe Scan Paused.")
-    exit()
+    # 2. UNIVERSE SCAN (UNLOCKED)
+    print("Fetching Universe...")
+    try: universe = get_universe()
+    except: universe = SHORT_WATCHLIST
+    
+    others = [t for t in universe if t not in priority_list]
+    print(f"Scanning {len(others)} Global Assets...")
+    
+    batches = [others[i:i + BATCH_SIZE] for i in range(0, len(others), BATCH_SIZE)]
+    all_results = []
+    
+    for i, batch in enumerate(batches):
+        print(f"Batch {i+1}/{len(batches)}...")
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_map = {executor.submit(analyze_ticker, t, "NEUTRAL"): t for t in batch}
+            for future in as_completed(future_map):
+                res = future.result()
+                if res: all_results.append(res)
+        if i < len(batches) - 1: time.sleep(SLEEP_TIME)
+
+    # 3. PRO DESKS
+    power = [r for r in all_results if abs(r['score']) >= 4]
+    power.sort(key=lambda x: abs(x['score']), reverse=True)
+    if power:
+        msg = "🔥 *POWER RANKINGS (Top 10)*\n"
+        for r in power[:10]: msg += format_scanner_card(r)
+        send_telegram(msg)
+        
+    dm_desk = [r for r in all_results if (r['techs']['demark_d']['is_9'] or r['techs']['demark_d']['countdown']==13) and r not in power]
+    if dm_desk:
+        msg = "🔢 *DEMARK SIGNALS (Daily)*\n"
+        for r in dm_desk[:10]: msg += format_scanner_card(r)
+        send_telegram(msg)
+        
+    print("DONE")

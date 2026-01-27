@@ -1,16 +1,16 @@
 name: Institutional Trading Scan
 
 on:
-  workflow_dispatch:      # Allows manual run button
-  schedule:
-    - cron: '30 20 * * *' # Runs daily at 4:30 PM ET
+  workflow_dispatch:      # Keeps the manual "Run" button active
+  # schedule:             <-- PAUSED (Commented out)
+  #   - cron: '30 20 * * *' <-- PAUSED (Commented out)
 
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
     
     # --- GLOBAL ENVIRONMENT VARIABLES ---
-    # We define these here so they are guaranteed to exist for the whole job.
+    # Defines secrets for the entire job so Python can see them
     env:
       TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
       # MAPPING FIX: Connecting your secret 'TELEGRAM_TOKEN' to the script's 'TELEGRAM_BOT_TOKEN'
